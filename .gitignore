@@ -1,0 +1,22 @@
+# Binaries
+bin/
+zephyria
+zephyria-bench
+bench
+bench_bin
+
+# Logs and Data
+*.log
+storage-test/
+tmp*/
+
+# Dependencies
+vendor/
+
+# OS files
+.DS_Store
+.vscode/
+
+# Go test artifacts
+*.test
+*.out
