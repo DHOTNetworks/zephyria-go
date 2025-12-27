@@ -94,16 +94,33 @@ To start a node with default devnet settings:
 ./zephyria
 ```
 
-### 3. Connecting to the Node
+### 3. Interactive Console (CLI)
 
-Once running, the node exposes two ports:
-- **JSON-RPC (Port 8545)**: Connect your wallet (e.g., Metamask) or run scripts.
-  - RPC URL: `http://localhost:8545`
-  - Chain ID: `1337`
-- **P2P (Port 30303)**: For peering with other nodes.
+The node starts an interactive shell for managing the blockchain:
 
-### 4. Running Benchmarks
+- **`info`**: Show block height, current hash, and state root.
+- **`peers`**: List connected P2P peers.
+- **`balance <address>`**: Check the ZEE balance of an account.
+- **`stake <amount> <address>`**: Stake ZEE to become a validator (requires key).
+- **`unstake <address>`**: Unstake ZEE.
+- **`addkey <private_key_hex>`**: Import a validator key for signing transactions.
+- **`exit`**: Gracefully stop the node and save state.
 
+### 4. Advanced Configuration
+
+**Port Selection:**
+By default, the node uses ports `8545` (HTTP), `8546` (WS), and `30303` (P2P).
+You can override the base P2P port using the `PORT` environment variable. The other ports will adjust automatically relative to it.
+
+```bash
+PORT=40404 ./zephyria
+# P2P: 40404, HTTP: 18646, WS: 18647
+```
+
+**State Persistence:**
+All chain data is stored in `tmp/zephyria_node_<P2P_PORT>`. The state is automatically persisted to LevelDB. To reset the chain, simply delete this directory.
+
+### 5. Running Benchmarks
 To test the performance on your machine:
 
 ```bash

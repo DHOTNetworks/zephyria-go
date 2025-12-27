@@ -25,6 +25,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/holiman/uint256"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
@@ -54,6 +55,7 @@ type Node struct {
 	// RPC & WS
 	httpListener net.Listener
 	wsListener   net.Listener
+	ipcListener  net.Listener
 }
 
 func New(cfg *Config) *Node {
@@ -134,7 +136,7 @@ func (n *Node) Start() error {
 	// ... (This logic remains, but we might want to update it later to fix sync persistence) ...
 
 	chainConfig := netCfg.ChainConfig()
-	executor := core.NewExecutor(chainConfig, netCfg)
+	executor := core.NewExecutor(chainConfig, netCfg, n.bc)
 
 	n.p2p.RegisterBlockHandler(func(p *p2p.Peer, b *ztypes.Block) {
 		n.stateLock.Lock()
@@ -192,14 +194,27 @@ func (n *Node) Start() error {
 	}
 
 	// 6. Executor
-	n.executor = core.NewExecutor(netCfg.ChainConfig(), netCfg)
+	n.executor = core.NewExecutor(netCfg.ChainConfig(), netCfg, n.bc)
 
 	// 7. Loop & RPC
 	txCh := make(chan *ethtypes.Transaction, 2000)
 
 	rpcServer := rpc.NewServer()
-	ethAPI := zrpc.NewPublicEthAPI(n.bc, n.state, txCh)
-	rpcServer.RegisterName("eth", ethAPI)
+
+	// Register eth_ services
+	if err := rpcServer.RegisterName("eth", zrpc.NewPublicEthAPI(n.bc, n.state, txCh, n.executor)); err != nil {
+		return err
+	}
+
+	// Register net_ services
+	if err := rpcServer.RegisterName("net", zrpc.NewPublicNetAPI(n.bc, n.p2p)); err != nil {
+		return err
+	}
+
+	// Register web3_ services
+	if err := rpcServer.RegisterName("web3", zrpc.NewPublicWeb3API()); err != nil {
+		return err
+	}
 
 	// Register Zelius API
 	zeliusAPI := zrpc.NewZephyriaAPI(n)
@@ -214,10 +229,20 @@ func (n *Node) Start() error {
 
 	go func() {
 		fmt.Printf("RPC Server listening on :%d\n", n.config.HTTPPort)
-		// Handler logic
-		// We use go-ethereum's internal HTTP logic usually via ServeHandler or similar?
-		// rpc.Server implements http.Handler.
-		if err := http.Serve(httpListener, rpcServer); err != nil {
+
+		// CORS Handler Wrapper
+		corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "*")
+
+			if r.Method == "OPTIONS" {
+				return
+			}
+			rpcServer.ServeHTTP(w, r)
+		})
+
+		if err := http.Serve(httpListener, corsHandler); err != nil {
 			// check close error
 		}
 	}()
@@ -239,6 +264,34 @@ func (n *Node) Start() error {
 				fmt.Printf("WebSocket Server listening on :%d\n", n.config.WSPort)
 				if err := http.Serve(wsListener, wsHandler); err != nil {
 					// log
+				}
+			}()
+		}
+	}
+
+	// 7. Start IPC RPC
+	if n.config.IPCPath != "" {
+		// Ensure cleanup of previous file
+		if err := os.Remove(n.config.IPCPath); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("WARNING: Failed to remove old IPC file: %v\n", err)
+		}
+
+		ipcListener, err := net.Listen("unix", n.config.IPCPath)
+		if err != nil {
+			fmt.Printf("WARNING: Failed to start IPC server: %v\n", err)
+		} else {
+			n.ipcListener = ipcListener
+			fmt.Printf("IPC endpoint opened at %s\n", n.config.IPCPath)
+
+			go func() {
+				// Accept connections and serve default codec (JSON-RPC)
+				for {
+					conn, err := ipcListener.Accept()
+					if err != nil {
+						// Check if closed
+						return
+					}
+					go rpcServer.ServeCodec(rpc.NewCodec(conn), 0)
 				}
 			}()
 		}
@@ -408,6 +461,33 @@ func (n *Node) loop(txCh chan *ethtypes.Transaction, executor *core.Executor) {
 		txs = validTxs
 
 		// ---------------------------------------------------------
+		// Nonce and Balance Validation
+		// ---------------------------------------------------------
+		n.stateLock.Lock()
+		finalTxs := make([]*ethtypes.Transaction, 0, len(txs))
+		for _, tx := range txs {
+			sender, _ := ethtypes.Sender(signer, tx)
+			nonce := n.state.GetNonce(sender)
+			if tx.Nonce() != nonce {
+				fmt.Printf(" [!] Nonce Mismatch: sender %s, tx %d, state %d\n", sender.Hex(), tx.Nonce(), nonce)
+				continue
+			}
+
+			// Basic balance check for gas (at least base fee * limit)
+			balance := n.state.GetBalance(sender)
+			cost := new(big.Int).Mul(tx.GasPrice(), new(big.Int).SetUint64(tx.Gas()))
+			cost256, _ := uint256.FromBig(cost)
+			if balance.Cmp(cost256) < 0 {
+				fmt.Printf(" [!] Insufficient Balance for Gas: sender %s, has %s, needs %s\n", sender.Hex(), balance.String(), cost256.String())
+				continue
+			}
+
+			finalTxs = append(finalTxs, tx)
+		}
+		n.stateLock.Unlock()
+		txs = finalTxs
+
+		// ---------------------------------------------------------
 		// Advanced PoS: Intercept Staking Transactions
 		// ---------------------------------------------------------
 		stakingAddr := n.netCfg.Params.StakingAddr
@@ -446,7 +526,7 @@ func (n *Node) loop(txCh chan *ethtypes.Transaction, executor *core.Executor) {
 			Time:       uint64(time.Now().Unix()),
 			Coinbase:   n.netCfg.Coinbase,
 			GasLimit:   n.netCfg.Params.DefaultGasLimit,
-			BaseFee:    n.netCfg.Params.DefaultBaseFee,
+			BaseFee:    core.CalcBaseFee(n.netCfg.ChainConfig(), parent.Header),
 			Difficulty: n.netCfg.Difficulty,
 		}
 
@@ -525,6 +605,14 @@ func (n *Node) loop(txCh chan *ethtypes.Transaction, executor *core.Executor) {
 			}
 
 		case <-ticker.C:
+			// Dynamic Validator Sync
+			// We need to ensure we have the latest set before checking leader
+			n.stateLock.Lock()
+			if err := n.engine.SyncValidators(n.state); err != nil {
+				fmt.Printf("Validator Sync Error: %v\n", err)
+			}
+			n.stateLock.Unlock()
+
 			roundStart = time.Now()
 			// Check if it's our turn to propose
 			parent := n.bc.CurrentBlock()
@@ -605,6 +693,11 @@ func (n *Node) Stop() {
 	fmt.Println("\nStopping Zephyria Node...")
 	if n.p2p != nil {
 		n.p2p.Stop()
+	}
+	if n.ipcListener != nil {
+		n.ipcListener.Close()
+		// Best effort removal
+		os.Remove(n.config.IPCPath)
 	}
 	if n.db != nil {
 		n.db.Close()

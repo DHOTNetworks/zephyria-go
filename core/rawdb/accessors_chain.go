@@ -6,6 +6,8 @@ import (
 
 	"zephyria/types"
 
+	"fmt" // Added for debugging
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/syndtr/goleveldb/leveldb"
 )
@@ -83,6 +85,9 @@ type TxLookupEntry struct {
 // WriteTxLookupEntries stores indices for all transactions in a block.
 func WriteTxLookupEntries(db *leveldb.DB, block *types.Block) error {
 	for i, tx := range block.Transactions {
+		// Log
+		fmt.Printf("DB: Indexing Tx %s at Block %d Index %d\n", tx.Hash().Hex(), block.Header.Number.Uint64(), i)
+
 		entry := TxLookupEntry{
 			BlockHash:  block.Hash(),
 			BlockIndex: block.Header.Number.Uint64(),

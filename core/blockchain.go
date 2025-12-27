@@ -3,12 +3,16 @@ package core
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"sync"
 
 	"zephyria/core/rawdb"
+	"zephyria/state"
 	"zephyria/types"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/tracing"
+	"github.com/ethereum/go-ethereum/params"
 	"github.com/syndtr/goleveldb/leveldb"
 )
 
@@ -33,18 +37,44 @@ func NewBlockchain(db *leveldb.DB, cfg *NetworkConfig) *Blockchain {
 	}
 
 	// Load head
+	// Load head
 	headHash := rawdb.ReadHeadBlockHash(db)
 	if headHash == (common.Hash{}) {
-		// Initialize Genesis from hardcoded parameters
+		// Initialize Genesis
 		genesis := GenerateGenesisBlock(cfg)
+
+		// Apply Genesis Allocation
+		// Create a temporary state to apply allocations
+		statedb := state.New(common.Hash{}, db)
+		alloc := GenesisAlloc(cfg)
+		for addr, balance := range alloc {
+			fmt.Printf("DEBUG: Genesis AddBalance: %s = %s\n", addr.Hex(), balance.String())
+			statedb.AddBalance(addr, balance, tracing.BalanceIncreaseGenesisBalance)
+		}
+		// Commit Genesis State
+		batch := new(leveldb.Batch)
+		root, err := statedb.Commit(db, batch)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to commit genesis state: %v", err))
+		}
+		// Write the batch to DB
+		if err := db.Write(batch, nil); err != nil {
+			panic(fmt.Sprintf("Failed to write genesis batch: %v", err))
+		}
+
+		// Update Genesis Header
+		genesis.Header.VerkleRoot = root
+		// Re-hash block (create new wrapper to cache hash)
+		genesis = types.NewBlock(genesis.Header, nil)
+
 		if err := bc.AddBlock(genesis, nil); err != nil {
 			fmt.Printf("CRITICAL: Failed to add genesis block: %v\n", err)
 		} else {
 			rawdb.WriteHeadBlockHash(db, genesis.Hash())
-			// log written
+			// Also write generic database keys if strictly needed
 		}
 		bc.currentBlock = genesis
-		fmt.Printf("\033[1;32m[✨] Initialized Genesis Block\033[0m | Hash: %s\n", genesis.Hash().Hex()[:10])
+		fmt.Printf("\033[1;32m[✨] Initialized Genesis Block\033[0m | Hash: %s | Root: %s\n", genesis.Hash().Hex()[:10], root.Hex()[:10])
 	} else {
 		// Load existing head
 		bc.currentBlock = rawdb.ReadBlock(db, headHash)
@@ -132,4 +162,60 @@ func (bc *Blockchain) CurrentBlock() *types.Block {
 // Database returns the underlying database.
 func (bc *Blockchain) Database() *leveldb.DB {
 	return bc.db
+}
+
+// StateAt returns a new state database for the given block root.
+func (bc *Blockchain) StateAt(root common.Hash) (*state.StateDB, error) {
+	return state.New(root, bc.db), nil
+}
+
+// CalcBaseFee implementation of EIP-1559 base fee calculation
+func CalcBaseFee(config *params.ChainConfig, parent *types.Header) *big.Int {
+	if parent.Number.Uint64() < config.LondonBlock.Uint64() {
+		return new(big.Int).SetUint64(params.InitialBaseFee)
+	}
+
+	// Safety handle for retconned chain: if parent didn't have BaseFee, start now
+	if parent.BaseFee == nil {
+		return new(big.Int).SetUint64(params.InitialBaseFee)
+	}
+
+	parentGasTarget := parent.GasLimit / config.ElasticityMultiplier()
+
+	if parent.GasUsed == parentGasTarget {
+		return new(big.Int).Set(parent.BaseFee)
+	}
+
+	if parent.GasUsed > parentGasTarget {
+		gasUsedDelta := parent.GasUsed - parentGasTarget
+		x := new(big.Int).SetUint64(gasUsedDelta)
+		y := new(big.Int).SetUint64(parentGasTarget)
+		z := new(big.Int).SetUint64(8)
+
+		// delta = (parent.BaseFee * gasUsedDelta) / (parentGasTarget * denominator)
+		num := new(big.Int).Mul(parent.BaseFee, x)
+		den := new(big.Int).Mul(y, z)
+		delta := new(big.Int).Div(num, den)
+		if delta.Cmp(big.NewInt(1)) < 0 {
+			delta.SetInt64(1)
+		}
+		return new(big.Int).Add(parent.BaseFee, delta)
+	} else {
+		gasUnusedDelta := parentGasTarget - parent.GasUsed
+		x := new(big.Int).SetUint64(gasUnusedDelta)
+		y := new(big.Int).SetUint64(parentGasTarget)
+		z := new(big.Int).SetUint64(8)
+
+		num := new(big.Int).Mul(parent.BaseFee, x)
+		den := new(big.Int).Mul(y, z)
+		delta := new(big.Int).Div(num, den)
+
+		// Cannot decrease below floor (1 Gwei)
+		floor := big.NewInt(1000000000)
+		nextBaseFee := new(big.Int).Sub(parent.BaseFee, delta)
+		if nextBaseFee.Cmp(floor) < 0 {
+			return floor
+		}
+		return nextBaseFee
+	}
 }

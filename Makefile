@@ -1,15 +1,15 @@
 .PHONY: all build zephyria bench clean test help
 
 # Default target
-all: build
+all: zephyria
 
 # Build both executables
 build: zephyria bench
 
 # Build the main zephyria node
 zephyria:
-	@echo "\033[1;34m[🔨] Building Zephyria Node...\033[0m"
-	@go build -o zephyria main.go
+	@echo "\033[1;34m[🔨] Building Zephyria Node (Optimized CLI)...\033[0m"
+	@go build -mod=vendor -o zephyria ./cmd/zephyria
 	@echo "\033[1;32m[✓] Zephyria built successfully!\033[0m"
 
 # Build the benchmark tool

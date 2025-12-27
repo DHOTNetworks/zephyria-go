@@ -252,8 +252,72 @@ func (e *ZeliusEngine) SelectProposer(seed common.Hash, round int) common.Addres
 	return e.GetLeader(0) // DUMMY - Node.go MUST change to GetLeader
 }
 
+// SyncValidators reloads the validator set from the state.
+func (e *ZeliusEngine) SyncValidators(stateDB interface{}) error {
+	// Interface Hack to avoid cyclic import if state package is not imported
+	// Ideally we use a minimized interface or import zephyria/state if possible
+	// For now, let's assume caller updates validators manually or we use a raw accessor?
+	// Actually, we can import zephyria/state in zelius.go if no cycle.
+	// zelius -> types (OK)
+	// state -> types (OK)
+	// core -> zelius (OK)
+	// core -> state (OK)
+	// No cycle.
+
+	// We need to reflect or define an interface for StateDB getters
+	type StateReader interface {
+		GetState(common.Address, common.Hash) common.Hash
+	}
+
+	s, ok := stateDB.(StateReader)
+	if !ok {
+		return fmt.Errorf("invalid stateDB type")
+	}
+
+	validatorAddr := common.HexToAddress("0x0000000000000000000000000000000000003000") // defined in genesis params really but hardcoded for now matches system_contracts
+	stakingAddr := common.HexToAddress("0x0000000000000000000000000000000000002000")
+
+	// 1. Get Count
+	countHash := s.GetState(validatorAddr, common.Hash{})
+	count := countHash.Big()
+
+	if count.Sign() == 0 {
+		return nil // No updates
+	}
+
+	// 2. Rebuild List
+	var newValidators []*Validator
+
+	for i := uint64(1); i <= count.Uint64(); i++ {
+		// Index -> AddressHash
+		indexKey := common.BigToHash(new(big.Int).SetUint64(i))
+		addrHash := s.GetState(validatorAddr, indexKey)
+		addr := common.BytesToAddress(addrHash.Bytes())
+
+		// Address -> Stake
+		key := common.BytesToHash(addr.Bytes()) // Simple key mapping used in system_contracts
+		stakeBytes := s.GetState(stakingAddr, key)
+		stake := stakeBytes.Big()
+
+		newValidators = append(newValidators, &Validator{Address: addr, Stake: stake})
+	}
+
+	// 3. Update Engine
+	// Minimal diff could be optimized, but full swap is safe for PoC
+	e.Validators = newValidators
+	e.f = (len(e.Validators) - 1) / 3
+	e.RecalculateSchedule()
+
+	// fmt.Printf("Consensus: Synced %d Validators from State\n", len(e.Validators))
+	return nil
+}
+
 // SimulateRound runs the consensus round and SEALS the result.
-func (e *ZeliusEngine) SimulateRound(parent *types.Block, txs []*ethtypes.Transaction) (*types.Block, error) {
+func (e *ZeliusEngine) SimulateRound(parent *types.Block, txs []*ethtypes.Transaction, stateDB interface{}) (*types.Block, error) {
+	// Sync first
+	if stateDB != nil {
+		e.SyncValidators(stateDB)
+	}
 	// ... (Existing ACS Logic - kept simulated for speed/PoC) ...
 
 	// Dynamic Proposer Selection (Zelius Style: Deterministic based on block number)

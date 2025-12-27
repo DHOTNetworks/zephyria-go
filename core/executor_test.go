@@ -28,9 +28,9 @@ func TestExecutor_Transfer(t *testing.T) {
 	s.SetBalance(addr, initBal, 0)
 
 	config := params.AllEthashProtocolChanges
-	config.ChainID = big.NewInt(1337)
+	config.ChainID = big.NewInt(99999)
 	netCfg := GetNetworkConfig(Devnet)
-	executor := NewExecutor(config, netCfg)
+	executor := NewExecutor(config, netCfg, nil)
 
 	// Create Tx
 	nonce := uint64(0)

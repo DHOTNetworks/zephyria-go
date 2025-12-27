@@ -67,7 +67,12 @@ func (c *NetworkConfig) ChainConfig() *params.ChainConfig {
 		IstanbulBlock:       big.NewInt(0),
 		MuirGlacierBlock:    big.NewInt(0),
 		BerlinBlock:         big.NewInt(0),
-		LondonBlock:         big.NewInt(0),
+		LondonBlock:         big.NewInt(0), // EIP-1559 Enabled
+		ArrowGlacierBlock:   nil,
+		GrayGlacierBlock:    nil,
+		MergeNetsplitBlock:  nil,
+		ShanghaiTime:        new(uint64), // Enable Shanghai (Time 0)
+		CancunTime:          new(uint64), // Enable Cancun (Time 0)
 	}
 }
 
@@ -77,12 +82,12 @@ func GetNetworkConfig(network string) *NetworkConfig {
 	switch network {
 	case Mainnet:
 		cfg = &NetworkConfig{
-			ChainID:     big.NewInt(1),
+			ChainID:     big.NewInt(999),
 			GenesisTime: uint64(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
-			GenesisHash: common.HexToHash("0x6241bba4b608b79c6bd0aeac71ea0fbb7ca1eebd16e5538b77bef399368da24a"),
+			GenesisHash: common.HexToHash("0x8cdc37cd690b6c953ea305b357eba4b443a844932e6bf99ccc06f659e6e10b5a"),
 			Difficulty:  big.NewInt(1),
 			GasLimit:    60000000,
-			BaseFee:     big.NewInt(100),
+			BaseFee:     big.NewInt(1000000000), // 1 Gwei Initial BaseFee
 			Coinbase:    common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
 			Validators:  DefaultValidators(),
 			ConsensusCfg: ConsensusConfig{
@@ -93,17 +98,17 @@ func GetNetworkConfig(network string) *NetworkConfig {
 				RewardAddr:      common.HexToAddress("0x0000000000000000000000000000000000002000"),
 				ValidatorAddr:   common.HexToAddress("0x0000000000000000000000000000000000003000"),
 				DefaultGasLimit: 60000000,
-				DefaultBaseFee:  big.NewInt(100),
+				DefaultBaseFee:  big.NewInt(1000000000),
 			},
 		}
 	case Testnet:
 		cfg = &NetworkConfig{
-			ChainID:     big.NewInt(1337),
+			ChainID:     big.NewInt(9999),
 			GenesisTime: uint64(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
-			GenesisHash: common.HexToHash("0x6241bba4b608b79c6bd0aeac71ea0fbb7ca1eebd16e5538b77bef399368da24a"),
+			GenesisHash: common.HexToHash("0x8cdc37cd690b6c953ea305b357eba4b443a844932e6bf99ccc06f659e6e10b5a"),
 			Difficulty:  big.NewInt(1),
 			GasLimit:    60000000,
-			BaseFee:     big.NewInt(100),
+			BaseFee:     nil, // EIP-1559 Disabled
 			Coinbase:    common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
 			Validators:  DefaultValidators(),
 			ConsensusCfg: ConsensusConfig{
@@ -114,17 +119,17 @@ func GetNetworkConfig(network string) *NetworkConfig {
 				RewardAddr:      common.HexToAddress("0x0000000000000000000000000000000000002000"),
 				ValidatorAddr:   common.HexToAddress("0x0000000000000000000000000000000000003000"),
 				DefaultGasLimit: 60000000,
-				DefaultBaseFee:  big.NewInt(100),
+				DefaultBaseFee:  big.NewInt(1000000000),
 			},
 		}
 	case Simulation:
 		cfg = &NetworkConfig{
 			ChainID:     big.NewInt(1338), // Different Chain ID
 			GenesisTime: uint64(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
-			GenesisHash: common.HexToHash("0x6241bba4b608b79c6bd0aeac71ea0fbb7ca1eebd16e5538b77bef399368da24a"), // Matches generated block
+			GenesisHash: common.HexToHash("0x8cdc37cd690b6c953ea305b357eba4b443a844932e6bf99ccc06f659e6e10b5a"), // Matches generated block
 			Difficulty:  big.NewInt(1),
 			GasLimit:    60000000,
-			BaseFee:     big.NewInt(100),
+			BaseFee:     nil, // EIP-1559 Disabled
 			Coinbase:    common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
 			Validators:  SimulationValidators(),
 			ConsensusCfg: ConsensusConfig{
@@ -135,18 +140,18 @@ func GetNetworkConfig(network string) *NetworkConfig {
 				RewardAddr:      common.HexToAddress("0x0000000000000000000000000000000000002000"),
 				ValidatorAddr:   common.HexToAddress("0x0000000000000000000000000000000000003000"),
 				DefaultGasLimit: 60000000,
-				DefaultBaseFee:  big.NewInt(100),
+				DefaultBaseFee:  big.NewInt(1000000000),
 			},
 		}
 
 	default: // Devnet / Default
 		cfg = &NetworkConfig{
-			ChainID:     big.NewInt(1337),
+			ChainID:     big.NewInt(99999),
 			GenesisTime: uint64(time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Unix()),
-			GenesisHash: common.HexToHash("0x6241bba4b608b79c6bd0aeac71ea0fbb7ca1eebd16e5538b77bef399368da24a"),
+			GenesisHash: common.HexToHash("0x8cdc37cd690b6c953ea305b357eba4b443a844932e6bf99ccc06f659e6e10b5a"),
 			Difficulty:  big.NewInt(1),
 			GasLimit:    60000000,
-			BaseFee:     big.NewInt(100),
+			BaseFee:     big.NewInt(1000000000), // 1 Gwei Initial BaseFee
 			Coinbase:    common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
 			Validators:  []*consensus.Validator{{Address: common.HexToAddress("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"), Stake: big.NewInt(100)}},
 			ConsensusCfg: ConsensusConfig{
@@ -157,7 +162,7 @@ func GetNetworkConfig(network string) *NetworkConfig {
 				RewardAddr:      common.HexToAddress("0x0000000000000000000000000000000000002000"),
 				ValidatorAddr:   common.HexToAddress("0x0000000000000000000000000000000000003000"),
 				DefaultGasLimit: 60000000,
-				DefaultBaseFee:  big.NewInt(100),
+				DefaultBaseFee:  big.NewInt(1000000000),
 			},
 		}
 	}
@@ -189,7 +194,7 @@ func SimulationValidators() []*consensus.Validator {
 // DefaultChainConfig returns the default hardcoded chain configuration
 func DefaultChainConfig() *params.ChainConfig {
 	return &params.ChainConfig{
-		ChainID:             big.NewInt(1337),
+		ChainID:             big.NewInt(99999),
 		HomesteadBlock:      big.NewInt(0),
 		DAOForkBlock:        big.NewInt(0),
 		EIP150Block:         big.NewInt(0),
@@ -201,7 +206,12 @@ func DefaultChainConfig() *params.ChainConfig {
 		IstanbulBlock:       big.NewInt(0),
 		MuirGlacierBlock:    big.NewInt(0),
 		BerlinBlock:         big.NewInt(0),
-		LondonBlock:         big.NewInt(0),
+		LondonBlock:         big.NewInt(0), // EIP-1559 Enabled
+		ArrowGlacierBlock:   nil,
+		GrayGlacierBlock:    nil,
+		MergeNetsplitBlock:  nil,
+		ShanghaiTime:        new(uint64), // Enable Shanghai (Time 0)
+		CancunTime:          new(uint64), // Enable Cancun (Time 0)
 	}
 }
 
@@ -233,6 +243,13 @@ func GenesisAlloc(cfg *NetworkConfig) map[common.Address]*uint256.Int {
 	alloc[cfg.Params.StakingAddr] = sysBal
 	alloc[cfg.Params.RewardAddr] = sysBal
 	alloc[cfg.Params.ValidatorAddr] = sysBal
+
+	// Requested Allocation
+	// 10,000 Zee = 10000 * 10^18
+	reqAddr := common.HexToAddress("0xfc77dd2e36da5546258f6c25cf0f71d1460aaff0")
+	reqAmt, _ := new(big.Int).SetString("10000000000000000000000", 10) // 10,000 * 1e18
+	reqBal, _ := uint256.FromBig(reqAmt)
+	alloc[reqAddr] = reqBal
 
 	return alloc
 }

@@ -40,7 +40,7 @@ func TestHBBFT_SimulateRound(t *testing.T) {
 	// Input txs
 	txs := []*ethtypes.Transaction{} // empty for simplicity or mock
 
-	block, err := engine.SimulateRound(parent, txs)
+	block, err := engine.SimulateRound(parent, txs, nil)
 	if err != nil {
 		t.Fatalf("SimulateRound failed: %v", err)
 	}

@@ -12,6 +12,7 @@ type Config struct {
 	// P2P
 	P2PPort   int
 	WSPort    int
+	IPCPath   string // Path to IPC socket file
 	Bootnodes []string
 }
 

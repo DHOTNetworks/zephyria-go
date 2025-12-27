@@ -3,15 +3,15 @@ package core
 import (
 	"fmt"
 	"math/big"
-	"strings"
 	"sync"
 	"zephyria/state"
 	ztypes "zephyria/types" // Zephyria types
 
+	zvm "zephyria/vm"
+
 	"github.com/ethereum/go-ethereum/common"
 	ethcore "github.com/ethereum/go-ethereum/core" // Alias to avoid conflict
-	"github.com/ethereum/go-ethereum/core/tracing"
-	"github.com/ethereum/go-ethereum/core/types" // Geth types
+	"github.com/ethereum/go-ethereum/core/types"   // Geth types
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
@@ -22,7 +22,14 @@ import (
 type Executor struct {
 	config *params.ChainConfig
 	netCfg *NetworkConfig
+	bc     interface { // Minimal interface to avoid cyclic import if possible, or use *Blockchain if same package (no, bc is in core too)
+		GetBlockByNumber(uint64) *ztypes.Block
+	}
 }
+
+// But wait, core/blockchain.go is in package core.
+// Executor is in package core.
+// So we can just use *Blockchain.
 
 var (
 	StakingAddr = common.HexToAddress("0x0000000000000000000000000000000000001000") // Fallback
@@ -30,8 +37,8 @@ var (
 )
 
 // NewExecutor creates a new Executor.
-func NewExecutor(config *params.ChainConfig, netCfg *NetworkConfig) *Executor {
-	return &Executor{config: config, netCfg: netCfg}
+func NewExecutor(config *params.ChainConfig, netCfg *NetworkConfig, bc *Blockchain) *Executor {
+	return &Executor{config: config, netCfg: netCfg, bc: bc}
 }
 
 // ApplyBlock executes transactions in a block and returns the receipts and new root.
@@ -45,6 +52,7 @@ func (e *Executor) ApplyBlock(statedb *state.StateDB, header *ztypes.Header, txs
 
 	// Track block-level limits
 	blockGasUsed := uint64(0)
+	totalFees := new(big.Int) // Accumulate fees
 
 	// Receipts need to be ordered same as txs.
 	// Map: TxHash -> Receipt, then reconstruction? Or just append in order?
@@ -77,9 +85,8 @@ func (e *Executor) ApplyBlock(statedb *state.StateDB, header *ztypes.Header, txs
 			go func(tx *types.Transaction) {
 				defer waveWg.Done()
 
-				// Enforce Tx Size Limit (Solana-style: 1232 bytes)
-				if tx.Size() > 1232 {
-					// Skip oversized tx
+				// Enforce Tx Size Limit (Zephyria PoC: 512KB)
+				if tx.Size() > 512*1024 {
 					return
 				}
 
@@ -97,35 +104,81 @@ func (e *Executor) ApplyBlock(statedb *state.StateDB, header *ztypes.Header, txs
 				// Enforce Account Gas Limit (simplified: Check limit logic would go here,
 				// but requires tracking usage across blocks. For PoC, we skip complex account tracking)
 
-				overlayDB.Prepare(rules, msg.From, header.Coinbase, nil, vm.ActivePrecompiles(rules), nil)
+				// Pass AccessList and Destination to Prepare
+				overlayDB.Prepare(rules, msg.From, header.Coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
 
-				evm := vm.NewEVM(vm.BlockContext{
-					CanTransfer: ethcore.CanTransfer,
-					Transfer:    ethcore.Transfer,
-					GetHash:     func(n uint64) common.Hash { return common.Hash{} },
-					Coinbase:    header.Coinbase,
-					BlockNumber: header.Number,
-					Time:        header.Time,
-					Difficulty:  header.Difficulty,
-					GasLimit:    header.GasLimit,
-					BaseFee:     header.BaseFee,
-				}, overlayDB, e.config, vm.Config{})
+				// Use Local Zephyria VM Wrapper
+				getHash := func(n uint64) common.Hash {
+					if header.Number.Uint64() > n && header.Number.Uint64()-n <= 256 {
+						if e.bc != nil {
+							block := e.bc.GetBlockByNumber(n)
+							if block != nil {
+								return block.Hash()
+							}
+						}
+					}
+					return common.Hash{}
+				}
 
-				gp := new(ethcore.GasPool)
-				gp.AddGas(header.GasLimit) // Allocation per tx? or shared? In parallel, shared is tricky.
-				// Give full limit to each, but cap at block end?
-				// For Sealevel, each tx has a limit.
+				// Create EVM via zvm package
+				// Using Geth Header type for compatibility in wrapper, or constructing block context manually if wrapper allows?
+				// Wrapper takes *types.Header (Geth). We have *ztypes.Header.
+				// We need to convert or adapt.
+				// For now, let's keep it simple: Wrapper accepts specific fields or we cast.
+				// Actually, ztypes.Header has exact same fields?
+				// Let's modify zvm to take config explicitly if headers mismatch.
+				// Or... Executor has ztypes.Header.
+				// Let's check imports in zephyria/vm/evm.go. It uses "github.com/ethereum/go-ethereum/core/types".
+				// ztypes is "zephyria/types".
+				// They are likely compatible structs but different types.
+				// I should cast or fill a Geth header.
 
-				// Execute
-				// Zephyria: Fee-free system contracts
+				// Define isSystemTx for gas refund logic
 				stakingAddr := e.netCfg.Params.StakingAddr
 				rewardAddr := e.netCfg.Params.RewardAddr
 				validatorAddr := e.netCfg.Params.ValidatorAddr
 				isSystemTx := msg.To != nil && (*msg.To == stakingAddr || *msg.To == rewardAddr || *msg.To == validatorAddr)
 
-				res, err := ethcore.ApplyMessage(evm, msg, gp)
+				gethHeader := &types.Header{
+					ParentHash:  header.ParentHash,
+					UncleHash:   types.EmptyUncleHash, // Zephyria doesn't use Uncles
+					Coinbase:    header.Coinbase,
+					Root:        header.VerkleRoot,   // Map VerkleRoot to Root
+					TxHash:      types.EmptyRootHash, // Not tracked in header in same way? Or we don't have it accessable here easily
+					ReceiptHash: types.EmptyRootHash,
+					Bloom:       types.Bloom{},
+					Difficulty:  header.Difficulty,
+					Number:      header.Number,
+					GasLimit:    header.GasLimit,
+					GasUsed:     header.GasUsed,
+					Time:        header.Time,
+					Extra:       header.ExtraData,
+					MixDigest:   common.Hash{},      // No PoW
+					Nonce:       types.BlockNonce{}, // No PoW
+					BaseFee:     header.BaseFee,
+				}
+
+				evm := zvm.New(gethHeader, e.config, overlayDB, getHash)
+
+				gp := new(ethcore.GasPool)
+				gp.AddGas(header.GasLimit)
+
+				// Execute via Wrapper
+				res, err := evm.ApplyMessage(msg, gp)
 				if err != nil {
+					// Even on error, we must produce a receipt to keep indices aligned
+					fmt.Printf(" [!] Block execution error for tx %s: %v\n", tx.Hash().Hex(), err)
+					idx := txIndex[tx.Hash()]
+					receipts[idx] = &ztypes.Receipt{
+						TxHash:  tx.Hash(),
+						Status:  0,
+						GasUsed: 0,
+					}
 					return
+				}
+
+				if res.Failed() {
+					fmt.Printf(" [!] Tx %s failed: %v\n", tx.Hash().Hex(), res.Err)
 				}
 
 				// If system tx, refund gas and skip fee deduction in final merge
@@ -134,99 +187,25 @@ func (e *Executor) ApplyBlock(statedb *state.StateDB, header *ztypes.Header, txs
 				}
 
 				// ---------------------------------------------------------
-				// STAKING CONTRACT LOGIC (Native Go Implementation)
+				// SYSTEM CONTRACTS
 				// ---------------------------------------------------------
-				sender := msg.From
-
-				if msg.To != nil && *msg.To == stakingAddr {
-					// 1. DEPOSIT (Stake)
-					if msg.Value.Sign() > 0 {
-						// Store Stake: State[StakingAddr][SenderHash] = Value
-						// For PoC: We overwrite (assuming single stake tx per user)
-						// In prod: Read + Add.
-
-						// Convert Value to Hash (Storage format)
-						// Note: Value is uint256.Int. usage depends on geth version in use by Executor wrapper.
-						// msg.Value is likely *big.Int or *uint256.Int depending on TransactionToMessage.
-						// ethcore.TransactionToMessage returns core.Message which uses *big.Int usually.
-						valBytes := common.BigToHash(msg.Value)
-						key := common.BytesToHash(sender.Bytes()) // Simple key
-						overlayDB.SetState(stakingAddr, key, valBytes)
-
-						// Update ValidatorSet (0x3000): Mark sender as Active
-						overlayDB.SetState(validatorAddr, key, common.HexToHash("0x1"))
-						// fmt.Printf("State: Staked %s for %s\n", msg.Value, sender.Hex())
-					}
-
-					// 2. WITHDRAW (Unstake)
-					if string(tx.Data()) == "UNSTAKE" {
-						key := common.BytesToHash(sender.Bytes())
-						storedVal := overlayDB.GetState(stakingAddr, key)
-
-						if (storedVal != common.Hash{}) {
-							amount := storedVal.Big()
-
-							// Minimum Unstake Check (PoC: 1 ZEE)
-							// if amount.Cmp(big.NewInt(1000000000000000000)) < 0 { return }
-
-							// Refund: StakingAddr -> Sender
-							// Need uint256 for AddBalanceReward (which acts as AddBalance generic)
-							amt256, _ := uint256.FromBig(amount)
-
-							// Security: Ensure StakingAddr has enough balance (it should if state is consistent)
-							if overlayDB.GetBalance(stakingAddr).Cmp(amt256) >= 0 {
-								overlayDB.SubBalance(stakingAddr, amt256, tracing.BalanceChangeReason(0))
-								overlayDB.AddBalance(sender, amt256, tracing.BalanceChangeReason(0))
-
-								// Zero out storage in both contracts
-								overlayDB.SetState(stakingAddr, key, common.Hash{})
-								overlayDB.SetState(validatorAddr, key, common.Hash{})
-							}
-						}
-					}
-				}
-
-				// ---------------------------------------------------------
-				// GENESIS REWARD CONTRACT LOGIC (Native Go)
-				// ---------------------------------------------------------
-				if msg.To != nil && *msg.To == rewardAddr {
-					// Logic: RewardAddr acts as a central vault.
-					// Only the Coinbase (Miner) can trigger a withdrawal from it.
-					// This prevents unauthorized draining of the reward pool.
-					if sender == header.Coinbase && msg.Value.Sign() == 0 && len(tx.Data()) > 0 {
-						// Format: "REWARD:<addr>:<amount_hex>"
-						data := string(tx.Data())
-						if len(data) > 7 && data[:7] == "REWARD:" {
-							parts := strings.Split(data[7:], ":")
-							if len(parts) == 2 {
-								targetAddr := common.HexToAddress(parts[0])
-								rewardAmt, _ := new(big.Int).SetString(parts[1], 16)
-
-								if rewardAmt != nil {
-									amt256, _ := uint256.FromBig(rewardAmt)
-									// Check pool balance
-									poolBal := overlayDB.GetBalance(rewardAddr)
-									if poolBal.Cmp(amt256) >= 0 {
-										overlayDB.SubBalance(rewardAddr, amt256, tracing.BalanceChangeReason(0))
-										overlayDB.AddBalance(targetAddr, amt256, tracing.BalanceChangeReason(0))
-										fmt.Printf("Genesis Reward: Distributed %s to %s\n", rewardAmt, targetAddr.Hex())
-									}
-								}
-							}
-						}
-					}
-				}
-
-				// ---------------------------------------------------------
-				// VALIDATOR SET CONTRACT LOGIC (Native Go)
-				// ---------------------------------------------------------
-				if msg.To != nil && *msg.To == validatorAddr {
-					// Handle validator activation/deactivation logic
-					// This would be triggered by StakingAddr or specialized protocol txs
-				}
+				// Pass Coinbase for checks? For now simplified.
+				e.ProcessSystemContracts(overlayDB, msg, tx, nil) // Header config not needed for basics
 				mergeLock.Lock()
 				overlayDB.Merge()
 				blockGasUsed += res.UsedGas // Track total gas
+
+				// Calculate Fee
+				gasPrice := tx.GasPrice()
+				if header.BaseFee != nil {
+					// Effective = min(GasFeeCap, BaseFee + TipCap)
+					priority := new(big.Int).Add(header.BaseFee, tx.GasTipCap())
+					if priority.Cmp(gasPrice) < 0 {
+						gasPrice = priority
+					}
+				}
+				fee := new(big.Int).Mul(new(big.Int).SetUint64(res.UsedGas), gasPrice)
+				totalFees.Add(totalFees, fee)
 
 				// Create Receipt
 				idx := txIndex[tx.Hash()]
@@ -252,28 +231,33 @@ func (e *Executor) ApplyBlock(statedb *state.StateDB, header *ztypes.Header, txs
 	// ECONOMICS: Block Rewards & Fees
 	// -------------------------------------------------------------
 	// 1. Block Reward: Fixed 10 ZEE
-	// 2. Tx Fees: Total Gas Used * Base Fee
-	// (Note: In EIP-1559, BaseFee is burned. Tip is given to miner.
-	// For Zephyria PoC, we give full fees to miner for simplicity/incentive).
+	// 2. Tx Fees: Sum of (GasUsed * EffectiveGasPrice)
 
 	reward := new(big.Int).SetUint64(10_000_000_000_000_000_000) // 10 ZEE
-	if header.BaseFee != nil {
-		fees := new(big.Int).Mul(new(big.Int).SetUint64(blockGasUsed), header.BaseFee)
-		reward.Add(reward, fees)
-	}
+
+	// Add accumulated fees (tracked in totalFees during execution)
+	reward.Add(reward, totalFees)
 
 	statedb.AddBalanceReward(header.Coinbase, uint256.MustFromBig(reward))
 	// fmt.Printf("Miner %s rewarded %s zei (Gas: %d)\n", header.Coinbase.Hex(), reward, blockGasUsed)
 
 	// Compact Receipts (remove nils from skipped txs)
+	// IMPORTANT: Every transaction in a block MUST have a receipt to keep indices aligned.
 	finalReceipts := make([]*ztypes.Receipt, 0)
 	cumulative := uint64(0)
-	for _, r := range receipts {
-		if r != nil {
-			cumulative += r.GasUsed
-			r.CumulativeGasUsed = cumulative // Correct cumulative calculation sequentially
-			finalReceipts = append(finalReceipts, r)
+	for i, r := range receipts {
+		if r == nil {
+			// This shouldn't happen if miners filter correctly, but for robustness:
+			// Add a failed receipt for the missing index.
+			r = &ztypes.Receipt{
+				TxHash:  txs[i].Hash(),
+				Status:  0,
+				GasUsed: 0,
+			}
 		}
+		cumulative += r.GasUsed
+		r.CumulativeGasUsed = cumulative
+		finalReceipts = append(finalReceipts, r)
 	}
 
 	// In Verkle, we return the new Root.
@@ -287,58 +271,46 @@ func status(failed bool) uint64 {
 	return 1
 }
 
-// schedule groups transactions into "waves". Transactions in the same wave are independent.
-func (e *Executor) schedule(txs []*types.Transaction) [][]*types.Transaction {
-	var waves [][]*types.Transaction
+// Schedule logic moved to scheduler.go
 
-	// Pending transactions that haven't been scheduled
-	queue := make([]*types.Transaction, len(txs))
-	copy(queue, txs)
+// Call executes a message call for simulation (eth_call, eth_estimateGas) without committing state.
+func (e *Executor) Call(statedb *state.StateDB, header *ztypes.Header, msg *ethcore.Message) (*ethcore.ExecutionResult, error) {
+	// Create isolated overlay state
+	overlayDB := statedb.NewOverlay()
 
-	signer := types.LatestSigner(e.config)
+	// Prepare EVM
+	rules := e.config.Rules(header.Number, true, header.Time)
 
-	for len(queue) > 0 {
-		var currentWave []*types.Transaction
-		var nextQueue []*types.Transaction
+	// Ensure context (Coinbase, Time, etc) matches the header provided (usually pending or latest)
+	getHash := func(n uint64) common.Hash { return common.Hash{} }
 
-		touched := make(map[common.Address]bool)
+	overlayDB.Prepare(rules, msg.From, header.Coinbase, msg.To, vm.ActivePrecompiles(rules), msg.AccessList)
 
-		for _, tx := range queue {
-			sender, _ := types.Sender(signer, tx) // Cached
-			recipient := common.Address{}
-			if tx.To() != nil {
-				recipient = *tx.To()
-			}
-
-			// Check conflicts
-			if touched[sender] || (tx.To() != nil && touched[recipient]) {
-				// Conflict: defer to next wave
-				nextQueue = append(nextQueue, tx)
-			} else {
-				// Independent: add to wave
-				currentWave = append(currentWave, tx)
-				touched[sender] = true
-				if tx.To() != nil {
-					touched[recipient] = true
-				}
-			}
-		}
-
-		if len(currentWave) == 0 {
-			// Should not happen unless cyclic dependency in single tx? (Impossible self-conflict logic above)
-			// Or just safer to break to avoid infinite loop
-			if len(nextQueue) > 0 {
-				// Force one to progress
-				waves = append(waves, []*types.Transaction{nextQueue[0]})
-				queue = nextQueue[1:]
-			} else {
-				break
-			}
-		} else {
-			waves = append(waves, currentWave)
-			queue = nextQueue
-		}
+	// Convert Header
+	gethHeader := &types.Header{
+		ParentHash:  header.ParentHash,
+		UncleHash:   types.EmptyUncleHash,
+		Coinbase:    header.Coinbase,
+		Root:        header.VerkleRoot,
+		TxHash:      types.EmptyRootHash,
+		ReceiptHash: types.EmptyRootHash,
+		Bloom:       types.Bloom{},
+		Difficulty:  header.Difficulty,
+		Number:      header.Number,
+		GasLimit:    header.GasLimit,
+		GasUsed:     header.GasUsed,
+		Time:        header.Time,
+		Extra:       header.ExtraData,
+		MixDigest:   common.Hash{},
+		Nonce:       types.BlockNonce{},
+		BaseFee:     header.BaseFee,
 	}
 
-	return waves
+	evm := zvm.New(gethHeader, e.config, overlayDB, getHash)
+
+	gp := new(ethcore.GasPool)
+	gp.AddGas(header.GasLimit)
+
+	// Execute
+	return evm.ApplyMessage(msg, gp)
 }

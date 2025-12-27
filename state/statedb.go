@@ -68,18 +68,26 @@ func New(root common.Hash, db *leveldb.DB) *StateDB {
 		count := 0
 		for iter.Next() {
 			// Key is v + actualKey
-			k := iter.Key()
+			// Must copy iterator slices as they are reused
+			kRaw := iter.Key()
+			k := make([]byte, len(kRaw))
+			copy(k, kRaw)
+
 			if len(k) < 1 {
 				continue
 			}
 			realKey := k[1:]
-			val := iter.Value()
+
+			valRaw := iter.Value()
+			val := make([]byte, len(valRaw))
+			copy(val, valRaw)
+
 			// Insert into tree
 			s.tree.Insert(realKey, val, s.resolver)
 			count++
 		}
 		iter.Release()
-		fmt.Printf("Reconstructed State Tree from %d DB entries.\n", count)
+		// fmt.Printf("Reconstructed State Tree from %d DB entries.\n", count)
 	}
 
 	return s
@@ -178,17 +186,24 @@ func (s *StateDB) setVerkleValue(key []byte, value []byte) {
 
 // Commit flushes the state changes to the given database batch.
 func (s *StateDB) Commit(db *leveldb.DB, batch *leveldb.Batch) (common.Hash, error) {
-	// 1. Write dirty values to DB
+	// 1. Write dirty values to DB (Verkle Leaves)
 	for k, v := range s.dirty {
 		// Prefix 'v' for verkle/state data
 		dbKey := append([]byte("v"), []byte(k)...)
 		batch.Put(dbKey, v)
 	}
 
-	// 2. Clear dirty set
+	// 2. Persist Code (PoC: Dump all cached code to DB)
+	// Optimization: Only write if new? For PoC overwrite is fine or check existence.
+	for hash, code := range s.code {
+		dbKey := append([]byte("c"), hash.Bytes()...)
+		batch.Put(dbKey, code)
+	}
+
+	// 3. Clear dirty set
 	s.dirty = make(map[string][]byte)
 
-	// 3. Return Root
+	// 4. Return Root
 	return s.IntermediateRoot(false), nil
 }
 
@@ -299,7 +314,21 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
 	hash := s.GetCodeHash(addr)
-	return s.code[hash]
+	if len(hash) == 0 || hash == types.EmptyCodeHash {
+		return nil
+	}
+	if code, ok := s.code[hash]; ok {
+		return code
+	}
+	// Try DB
+	if s.db != nil {
+		dbKey := append([]byte("c"), hash.Bytes()...)
+		if code, err := s.db.Get(dbKey, nil); err == nil {
+			s.code[hash] = code
+			return code
+		}
+	}
+	return nil
 }
 
 func (s *StateDB) SetCode(addr common.Address, code []byte, reason tracing.CodeChangeReason) []byte {

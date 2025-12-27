@@ -1,6 +1,6 @@
 # Binaries
 bin/
-zephyria
+/zephyria
 zephyria-bench
 bench
 bench_bin
@@ -9,9 +9,10 @@ bench_bin
 *.log
 storage-test/
 tmp*/
+zephyria-chaindata/
 
 # Dependencies
-vendor/
+# vendor/ (Removed for custom protocol patches)
 
 # OS files
 .DS_Store
