@@ -3,6 +3,7 @@ package rawdb
 import (
 	"encoding/binary"
 	"encoding/json"
+	"strings"
 
 	"zephyria/types"
 
@@ -20,6 +21,8 @@ var (
 	txLookupPrefix      = []byte("l")          // l + txHash -> {blockHash, blockNum, txIndex}
 	headHeaderPrefix    = []byte("HeadHeader") // -> hash
 	headBlockPrefix     = []byte("HeadBlock")  // -> hash
+	logAddrPrefix       = []byte("LA")         // LA + addr + blockNum -> blockHash
+	logTopicPrefix      = []byte("LT")         // LT + topic + blockNum -> blockHash
 )
 
 // WriteBlock writes a block to the database.
@@ -119,6 +122,44 @@ func ReadTxLookupEntry(db *leveldb.DB, txHash common.Hash) *TxLookupEntry {
 	return &entry
 }
 
+// ReadLogIndices searches the index for blocks containing an address or topic.
+func ReadLogIndices(db *leveldb.DB, isTopic bool, key []byte, begin, end uint64) []uint64 {
+	prefix := logAddrPrefix
+	if isTopic {
+		prefix = logTopicPrefix
+	}
+
+	start := make([]byte, len(prefix)+len(key)+8)
+	copy(start, prefix)
+	copy(start[len(prefix):], key)
+	binary.BigEndian.PutUint64(start[len(prefix)+len(key):], begin)
+
+	iter := db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	var blocks []uint64
+	// Search target: Prefix + Key
+	targetPrefix := append(prefix, key...)
+
+	if ok := iter.Seek(start); ok {
+		for {
+			k := iter.Key()
+			if !strings.HasPrefix(string(k), string(targetPrefix)) {
+				break
+			}
+			num := binary.BigEndian.Uint64(k[len(k)-8:])
+			if num > end {
+				break
+			}
+			blocks = append(blocks, num)
+			if !iter.Next() {
+				break
+			}
+		}
+	}
+	return blocks
+}
+
 // WriteHeadBlockHash stores the head block hash.
 func WriteHeadBlockHash(db *leveldb.DB, hash common.Hash) error {
 	return db.Put(headBlockPrefix, hash.Bytes(), nil)
@@ -142,6 +183,7 @@ func WriteCanonicalHash(db *leveldb.DB, number uint64, hash common.Hash) error {
 }
 
 // ReadCanonicalHash retrieves the canonical hash for a block number.
+// ReadCanonicalHash retrieves the canonical hash for a block number.
 func ReadCanonicalHash(db *leveldb.DB, number uint64) common.Hash {
 	var numBytes [8]byte
 	binary.BigEndian.PutUint64(numBytes[:], number)
@@ -151,4 +193,41 @@ func ReadCanonicalHash(db *leveldb.DB, number uint64) common.Hash {
 		return common.Hash{}
 	}
 	return common.BytesToHash(data)
+}
+
+// IndexLogs creates indices for address and topics for fast retrieval.
+func IndexLogs(db *leveldb.DB, blockHash common.Hash, blockNum uint64, receipts []*types.Receipt) error {
+	batch := new(leveldb.Batch)
+
+	for _, receipt := range receipts {
+		uniqueAddrs := make(map[common.Address]struct{})
+		uniqueTopics := make(map[common.Hash]struct{})
+
+		for _, log := range receipt.Logs {
+			uniqueAddrs[log.Address] = struct{}{}
+			for _, topic := range log.Topics {
+				uniqueTopics[topic] = struct{}{}
+			}
+		}
+
+		// Write Address Indices
+		for addr := range uniqueAddrs {
+			key := make([]byte, len(logAddrPrefix)+20+8)
+			copy(key, logAddrPrefix)
+			copy(key[len(logAddrPrefix):], addr.Bytes())
+			binary.BigEndian.PutUint64(key[len(logAddrPrefix)+20:], blockNum)
+			batch.Put(key, blockHash.Bytes())
+		}
+
+		// Write Topic Indices
+		for topic := range uniqueTopics {
+			key := make([]byte, len(logTopicPrefix)+32+8)
+			copy(key, logTopicPrefix)
+			copy(key[len(logTopicPrefix):], topic.Bytes())
+			binary.BigEndian.PutUint64(key[len(logTopicPrefix)+32:], blockNum)
+			batch.Put(key, blockHash.Bytes())
+		}
+	}
+
+	return db.Write(batch, nil)
 }

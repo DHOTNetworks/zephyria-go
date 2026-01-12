@@ -1,0 +1,12 @@
+[package]
+name = "zephyria-consensus"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zephyria-types = { path = "../zephyria-types" }
+blst = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+parking_lot = "0.12"

@@ -7,6 +7,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
 )
 
 // Header represents the block header.
@@ -18,7 +19,6 @@ type Header struct {
 	TxHash     common.Hash    `json:"txHash"`     // Hash of the transactions
 	Coinbase   common.Address `json:"coinbase"`
 	ExtraData  []byte         `json:"extraData"`
-	Difficulty *big.Int       `json:"difficulty"`
 	GasLimit   uint64         `json:"gasLimit"`
 	GasUsed    uint64         `json:"gasUsed"`
 	BaseFee    *big.Int       `json:"baseFee"`
@@ -30,8 +30,14 @@ type Block struct {
 	Transactions []*ethtypes.Transaction `json:"transactions"`
 }
 
-// NewBlock creates a new block.
+// NewBlock creates a new block and calculates the transaction hash.
 func NewBlock(header *Header, txs []*ethtypes.Transaction) *Block {
+	if len(txs) > 0 {
+		header.TxHash = ethtypes.DeriveSha(ethtypes.Transactions(txs), trie.NewStackTrie(nil))
+	} else {
+		// Empty root hash (Keccak of empty RLP string, or standard Geth EmptyRootHash)
+		header.TxHash = ethtypes.EmptyRootHash
+	}
 	return &Block{
 		Header:       header,
 		Transactions: txs,

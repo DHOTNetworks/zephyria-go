@@ -1,0 +1,30 @@
+[package]
+name = "zephyria-p2p"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zephyria-types = { path = "../zephyria-types" }
+zephyria-core = { path = "../zephyria-core" }
+tokio = { version = "1.0", features = ["full"] }
+libp2p = { version = "0.53", features = [
+    "quic", 
+    "noise", 
+    "yamux", 
+    "identify", 
+    "gossipsub", 
+    "mdns", 
+    "request-response",
+    "cbor",
+    "macros", 
+    "tokio",
+    "dns"
+] }
+anyhow = "1.0"
+log = "0.4"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+reed-solomon-erasure = "6.0"
+k256 = { version = "0.13", features = ["ecdsa"] }
+alloy-rlp = { workspace = true }
+

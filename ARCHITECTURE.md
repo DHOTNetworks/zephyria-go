@@ -21,7 +21,7 @@ This document outlines the core components of the Zephyria blockchain engine and
 - **Function**:
   - **Blockchain**: Manages the canonical history of blocks. Indexes BlockHash -> BlockNumber.
   - **Executor**: The State Transition Machine.
-    - **Sealevel**: Executes transactions in parallel (simulated concurrency).
+    - **Aquarius**: Executes transactions in parallel (simulated concurrency).
     - Applies balance transfers and state updates to the `StateDB`.
   - **RawDB**: Low-level database accessors for storing Blocks and Canonical Indices in LevelDB.
 

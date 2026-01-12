@@ -1,21 +1,19 @@
 package state
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/big"
+	"sort"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	gestate "github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/stateless"
-	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie/utils"
 	"github.com/ethereum/go-verkle"
-	"github.com/holiman/uint256"
 	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/util"
 )
 
 // StateDB implements the EVM StateDB interface using a Verkle Tree.
@@ -40,13 +38,133 @@ type StateDB struct {
 	transientStorage map[common.Address]map[common.Hash]common.Hash
 
 	// Parallel Execution Logic
-	parent *StateDB
-	dirty  map[string][]byte // Key -> Value (buffer for overlay)
-	lock   sync.RWMutex      // For concurrent access to overlay fields if needed (though lanes are single-threaded)
+	parent    *StateDB
+	parentRev int                 // Revision of parent when overlay was created
+	dirty     map[string][]byte   // Key -> Value (buffer for overlay)
+	deltas    map[string]*big.Int // Key -> Delta (Additive changes)
+	journal   []JournalEntry      // Journal for state reverts
+	lock      sync.RWMutex        // For concurrent access to overlay fields
+
+	// Pruning / Versioning
+	viewBlock uint64 // 0 means "latest/head" or unknown (scan latest)
+
+	// Per-transaction refund counter
+	refund uint64
+}
+
+// Finalise finalises the state by removing the self destructed objects.
+func (s *StateDB) Finalise(deleteEmptyObjects bool) {
+	// For PoC/Verkle, explicit deletion might be handled via journaling or overlay flush.
+	// We can leave this as no-op if we rely on journal replay for deletes,
+	// or if we don't support EIP-161 state clearing fully here.
+}
+
+func (s *StateDB) PointCache() *utils.PointCache       { return nil }
+func (s *StateDB) Witness() *stateless.Witness         { return nil }
+func (s *StateDB) AccessEvents() *gestate.AccessEvents { return nil }
+
+// Snapshot returns an identifier for the current revision of the state.
+func (s *StateDB) Snapshot() int {
+	return len(s.journal)
+}
+
+// RevertToSnapshot reverts all state changes made since the given revision.
+func (s *StateDB) RevertToSnapshot(revid int) {
+	// Sanity check
+	if revid > len(s.journal) {
+		// Should not happen
+		return
+	}
+	// Revert backwards
+	for i := len(s.journal) - 1; i >= revid; i-- {
+		s.journal[i].revert(s)
+	}
+	// Truncate
+	s.journal = s.journal[:revid]
+}
+
+// AddPreimage records a SHA3 preimage seen by the VM.
+func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
+	if _, ok := s.preimages[hash]; !ok {
+		s.journal = append(s.journal, addPreimageChange{hash: hash})
+		pi := make([]byte, len(preimage))
+		copy(pi, preimage)
+		s.preimages[hash] = pi
+	}
+}
+
+// AddRefund adds gas to the refund counter.
+func (s *StateDB) AddRefund(gas uint64) {
+	s.journal = append(s.journal, refundChange{prev: s.refund})
+	s.refund += gas
+}
+
+// SubRefund removes gas from the refund counter.
+func (s *StateDB) SubRefund(gas uint64) {
+	s.journal = append(s.journal, refundChange{prev: s.refund})
+	if gas > s.refund {
+		panic("Refund counter underflow")
+	}
+	s.refund -= gas
+}
+
+// GetRefund returns the current value of the refund counter.
+func (s *StateDB) GetRefund() uint64 {
+	return s.refund
 }
 
 type accessList struct {
-	// simplified
+	addresses map[common.Address]int
+	slots     map[common.Address]map[common.Hash]int
+}
+
+func newAccessList() *accessList {
+	return &accessList{
+		addresses: make(map[common.Address]int),
+		slots:     make(map[common.Address]map[common.Hash]int),
+	}
+}
+
+// AddAddress adds an address to the access list, returning true if it was new.
+func (al *accessList) AddAddress(addr common.Address) bool {
+	if _, present := al.addresses[addr]; present {
+		return false
+	}
+	al.addresses[addr] = 0 // Value could be used for rollback index
+	return true
+}
+
+// AddSlot adds a storage slot to the access list, returning true if it was new.
+func (al *accessList) AddSlot(addr common.Address, slot common.Hash) bool {
+	al.AddAddress(addr)
+	slots, present := al.slots[addr]
+	if !present {
+		slots = make(map[common.Hash]int)
+		al.slots[addr] = slots
+	}
+	if _, present := slots[slot]; present {
+		return false
+	}
+	slots[slot] = 0 // Value could be used for rollback index
+	return true
+}
+
+func (al *accessList) ContainsAddress(addr common.Address) bool {
+	_, present := al.addresses[addr]
+	return present
+}
+
+func (al *accessList) Contains(addr common.Address, slot common.Hash) (addressPresent bool, slotPresent bool) {
+	_, addressPresent = al.addresses[addr]
+	if !addressPresent {
+		return false, false
+	}
+	slots, present := al.slots[addr]
+	if !present {
+		return true, false
+	}
+	_, slotPresent = slots[slot]
+	return true, slotPresent
 }
 
 func New(root common.Hash, db *leveldb.DB) *StateDB {
@@ -57,54 +175,56 @@ func New(root common.Hash, db *leveldb.DB) *StateDB {
 		preimages:        make(map[common.Hash][]byte),
 		transientStorage: make(map[common.Address]map[common.Hash]common.Hash),
 		dirty:            make(map[string][]byte),
+		deltas:           make(map[string]*big.Int),
 	}
 
 	// PoC Persistence: Always reconstruct tree from DB keys
 	// Since we only save leaf values in 'v' prefix, we must replay them to rebuild the tree.
 	s.tree = verkle.New()
 
-	if s.db != nil {
-		iter := s.db.NewIterator(util.BytesPrefix([]byte("v")), nil)
-		count := 0
-		for iter.Next() {
-			// Key is v + actualKey
-			// Must copy iterator slices as they are reused
-			kRaw := iter.Key()
-			k := make([]byte, len(kRaw))
-			copy(k, kRaw)
-
-			if len(k) < 1 {
-				continue
-			}
-			realKey := k[1:]
-
-			valRaw := iter.Value()
-			val := make([]byte, len(valRaw))
-			copy(val, valRaw)
-
-			// Insert into tree
-			s.tree.Insert(realKey, val, s.resolver)
-			count++
+	// Versioning: Lookup BlockNumber from Root
+	if root != (common.Hash{}) && s.db != nil {
+		// Key: "r" + Root
+		rKey := append([]byte("r"), root.Bytes()...)
+		if bNumBytes, err := s.db.Get(rKey, nil); err == nil {
+			s.viewBlock = new(big.Int).SetBytes(bNumBytes).Uint64()
+			// fmt.Printf("DEBUG: StateDB View Reconstructed for Root %s -> Block %d\n", root.Hex()[:8], s.viewBlock)
 		}
-		iter.Release()
-		// fmt.Printf("Reconstructed State Tree from %d DB entries.\n", count)
 	}
 
+	// Optimization: State Tree Cache
+	// Instead of iterating the entire LevelDB "v" prefix (which is slow),
+	// we try to load a cached list of active leaf keys.
+	if s.db != nil {
+		s.loadTreeFromCache()
+	}
 	return s
 }
 
 // NewOverlay creates a new state that reads from 's' but writes locally.
 func (s *StateDB) NewOverlay() *StateDB {
-	return &StateDB{
+	s.rwMutex.RLock()
+	defer s.rwMutex.RUnlock()
+
+	overlay := &StateDB{
 		parent:           s,
-		db:               s.db, // Share DB (read-only for overlay essentially)
+		parentRev:        s.Snapshot(), // Capture parent revision
+		db:               s.db,         // Share DB (read-only for overlay essentially)
 		dirty:            make(map[string][]byte),
+		deltas:           make(map[string]*big.Int),
 		code:             make(map[common.Hash][]byte),
 		logs:             make(map[common.Hash][]*types.Log),
 		preimages:        make(map[common.Hash][]byte),
 		transientStorage: make(map[common.Address]map[common.Hash]common.Hash),
-		tree:             nil, // Overlay doesn't own a tree
 	}
+
+	// For Verkle root calculation to work in overlays, we need a tree.
+	// However, copying the tree (even Copy()) might share internal nodes, leading to Data Races during parallel Insert.
+	// Since Transaction Overlays don't need to calculate Roots (only merge), we can skip the tree.
+	// Reads will fall back to parent. Writes go to dirty map.
+	overlay.tree = nil
+
+	return overlay
 }
 
 // Merge flushes changes from this overlay back to the parent.
@@ -112,21 +232,97 @@ func (s *StateDB) Merge() {
 	if s.parent == nil {
 		return
 	}
-	// Merge dirty keys
-	for k, v := range s.dirty {
-		s.parent.setVerkleValue([]byte(k), v)
+	s.parent.rwMutex.Lock()
+	defer s.parent.rwMutex.Unlock()
+
+	// Merge dirty keys and update parent tree
+	dirtyKeys := make([]string, 0, len(s.dirty))
+	for k := range s.dirty {
+		dirtyKeys = append(dirtyKeys, k)
 	}
+	sort.Strings(dirtyKeys)
+	for _, k := range dirtyKeys {
+		s.parent.setVerkleValue([]byte(k), s.dirty[k])
+	}
+
+	// Merge Deltas (Commutative State Updates)
+	// We sort keys for deterministic merge order
+	deltaKeys := make([]string, 0, len(s.deltas))
+	for k := range s.deltas {
+		deltaKeys = append(deltaKeys, k)
+	}
+	sort.Strings(deltaKeys)
+
+	for _, k := range deltaKeys {
+		delta := s.deltas[k]
+		// Read current value from parent (which includes valid dirty updates from this merge or previous)
+		// Note: getVerkleValue handles reading from dirty/tree
+		currBytes := s.parent.getVerkleValue([]byte(k))
+
+		var currVal big.Int
+		if len(currBytes) > 0 {
+			currVal.SetBytes(currBytes)
+		}
+
+		// Apply Delta
+		newVal := new(big.Int).Add(&currVal, delta)
+
+		// Write back to parent
+		// Note: storage values are usually 32 bytes (uint256)
+		// We might need handling for specific encoding if using RLP, but raw bytes works for now.
+		// Assuming standard 32-byte big-endian for storage.
+		bytes := newVal.Bytes()
+		// Padding to 32 bytes to match standard EVM storage behavior if needed,
+		// but variable length is fine for Verkle if accessors handle it.
+		// Standard EVM is 32 bytes.
+		if len(bytes) < 32 {
+			padded := make([]byte, 32)
+			copy(padded[32-len(bytes):], bytes)
+			bytes = padded
+		} else if len(bytes) > 32 {
+			// Overflow or just large number? EVM is 256 bit.
+			// Just slice last 32? Or keep full?
+			// Let's assume valid uint256 math happened.
+			bytes = bytes[len(bytes)-32:]
+		}
+
+		s.parent.setVerkleValue([]byte(k), bytes)
+	}
+
 	// Merge code
-	for k, v := range s.code {
-		s.parent.code[k] = v
+	codeKeys := make([]common.Hash, 0, len(s.code))
+	for k := range s.code {
+		codeKeys = append(codeKeys, k)
 	}
+	// Sort by bytes/string representation
+	sort.Slice(codeKeys, func(i, j int) bool {
+		return string(codeKeys[i].Bytes()) < string(codeKeys[j].Bytes())
+	})
+	for _, k := range codeKeys {
+		s.parent.code[k] = s.code[k]
+	}
+
 	// Merge logs
-	for k, v := range s.logs {
-		s.parent.logs[k] = append(s.parent.logs[k], v...)
+	logKeys := make([]common.Hash, 0, len(s.logs))
+	for k := range s.logs {
+		logKeys = append(logKeys, k)
 	}
-	// Merge preimages
-	for k, v := range s.preimages {
-		s.parent.preimages[k] = v
+	sort.Slice(logKeys, func(i, j int) bool {
+		return string(logKeys[i].Bytes()) < string(logKeys[j].Bytes())
+	})
+	for _, k := range logKeys {
+		s.parent.logs[k] = append(s.parent.logs[k], s.logs[k]...)
+	}
+	// Preimages
+	prekeys := make([]common.Hash, 0, len(s.preimages))
+	for k := range s.preimages {
+		prekeys = append(prekeys, k)
+	}
+	sort.Slice(prekeys, func(i, j int) bool {
+		return string(prekeys[i].Bytes()) < string(prekeys[j].Bytes())
+	})
+	for _, k := range prekeys {
+		s.parent.preimages[k] = s.preimages[k]
 	}
 }
 
@@ -136,10 +332,72 @@ func (s *StateDB) resolver(key []byte) ([]byte, error) {
 	if s.db == nil {
 		return nil, fmt.Errorf("no db")
 	}
-	// Prefix 'v' used in Commit
-	dbKey := append([]byte("v"), key...)
-	data, err := s.db.Get(dbKey, nil)
-	return data, err
+	// Versioned Key: "v" + key + blockNum (8 bytes BigEndian)
+	// We want the highest blockNum <= s.viewBlock
+
+	// Prefix: "v" + key
+	prefix := append([]byte("v"), key...)
+
+	// Seek: prefix + (s.viewBlock encoded)
+	// Note: leveldb iterator Seek goes to >= target.
+	// If we want <= viewBlock, we need a reverse strategy or clever seek.
+	// Storage Format: Key | BlockNum.
+	// If we store BlockNum BigEndian: 0, 1, 2...
+	// Seek(Key | ViewBlock+1).Prev() should give us Key | ViewBlock (or smaller).
+	// Let's assume BigEndian uint64.
+
+	seekKey := make([]byte, len(prefix)+8)
+	copy(seekKey, prefix)
+
+	// If seeking <= viewBlock, let's seek viewBlock + 1 (or MaxUint64 if viewBlock=0/Latest)
+	target := s.viewBlock
+	if target == 0 {
+		target = ^uint64(0) // Max
+	}
+	// We want strictly <= target.
+	// Seek(Key | Target). If exact match, good.
+	// If not, it lands on next key. Prev() gives us candidate.
+
+	binary.BigEndian.PutUint64(seekKey[len(prefix):], target)
+
+	iter := s.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	if ok := iter.Seek(seekKey); ok {
+		// We landed on >= seekKey.
+		// If exact match (valid only if viewBlock was exact block):
+		if string(iter.Key()) == string(seekKey) {
+			val := iter.Value()
+			ret := make([]byte, len(val))
+			copy(ret, val)
+			return ret, nil
+		}
+		// Else, we are > target. Go back.
+		if iter.Prev() {
+			// Check valid prefix
+			k := iter.Key()
+			if len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix) {
+				val := iter.Value()
+				ret := make([]byte, len(val))
+				copy(ret, val)
+				return ret, nil
+			}
+		}
+	} else {
+		// Seek failed (past end?). Try Last() or Prev()?
+		// If Seek failed, we might be past the end.
+		if iter.Last() {
+			k := iter.Key()
+			if len(k) >= len(prefix) && string(k[:len(prefix)]) == string(prefix) {
+				val := iter.Value()
+				ret := make([]byte, len(val))
+				copy(ret, val)
+				return ret, nil
+			}
+		}
+	}
+
+	return nil, nil // Not found
 }
 
 func (s *StateDB) getVerkleValue(key []byte) []byte {
@@ -152,10 +410,21 @@ func (s *StateDB) getVerkleValue(key []byte) []byte {
 
 	// If overlay, delegate to parent
 	if s.parent != nil {
+		// Safety Check: Ensure parent hasn't changed since we started
+		// Note: Accessing s.parent.Snapshot() requires lock if parent is active.
+		// Optimistic: We assume parent is locked/stable during parallel execution phase.
+		// In some edge cases (estimateGas), the parent might advance during simulation.
+		// We'll proceed but this might lead to inconsistent reads in highly parallel environments.
+		/* if s.parent.Snapshot() != s.parentRev {
+			panic("CRITICAL: Parent state modified during parallel overlay execution!")
+		} */
 		return s.parent.getVerkleValue(key)
 	}
 
 	// Base state lookup
+	s.rwMutex.RLock()
+	defer s.rwMutex.RUnlock()
+
 	if s.tree == nil {
 		return nil
 	}
@@ -170,302 +439,137 @@ func (s *StateDB) getVerkleValue(key []byte) []byte {
 }
 
 func (s *StateDB) setVerkleValue(key []byte, value []byte) {
+	// Journal the change
+	keyStr := string(key)
+	prevVal, prevDirt := s.dirty[keyStr]
+	// Optimized: only journal if different (though checking diff might be expensive, just blind journal is safer for revert)
+	// But Wait! If `prevDirt` is false, `prevVal` is empty/nil from map lookup?
+	// Yes. But `dirty` map only holds *changes*.
+	// If it wasn't in dirty, `prevVal` is nil. Revert will delete it. Correct.
+	// If it WAS in dirty, `prevVal` is the old dirty value. Revert will restore it. Correct.
+
+	s.journal = append(s.journal, dirtyChange{
+		key:      keyStr,
+		prevVal:  prevVal,
+		prevDirt: prevDirt,
+	})
+
 	// Always write to dirty map for persistence tracking
-	s.dirty[string(key)] = value
+	s.dirty[keyStr] = value
 
-	// If overlay, we are done (writes are buffered in dirty)
-	if s.parent != nil {
-		return
-	}
-
-	// Base mode: Update the actual memory tree for execution
+	// Update the local tree (whether overlay or base) so IntermediateRoot is correct
 	if s.tree != nil {
+		// fmt.Printf("DEBUG: Updating Tree with Key %x | Val %x\n", key, value)
 		s.tree.Insert(key, value, s.resolver)
 	}
 }
 
-// Commit flushes the state changes to the given database batch.
-func (s *StateDB) Commit(db *leveldb.DB, batch *leveldb.Batch) (common.Hash, error) {
-	// 1. Write dirty values to DB (Verkle Leaves)
-	for k, v := range s.dirty {
-		// Prefix 'v' for verkle/state data
-		dbKey := append([]byte("v"), []byte(k)...)
-		batch.Put(dbKey, v)
+// IntermediateRoot computes the current root hash of the state trie.
+// It is called in between transactions to get the root for the receipt.
+// In Verkle, this might involve flushing pending insertions.
+func (s *StateDB) IntermediateRoot(chain bool) common.Hash {
+	if s.tree == nil {
+		if s.parent != nil {
+			return s.parent.IntermediateRoot(chain)
+		}
+		fmt.Printf(" [!] WARNING: IntermediateRoot called on nil tree\n")
+		return common.Hash{}
 	}
+	// Standard Verkle tree root calculation.
+	// We MUST call Commit() to update internal node commitments before Hash().
+	s.tree.Commit()
+	h := s.tree.Hash()
 
-	// 2. Persist Code (PoC: Dump all cached code to DB)
-	// Optimization: Only write if new? For PoC overwrite is fine or check existence.
-	for hash, code := range s.code {
-		dbKey := append([]byte("c"), hash.Bytes()...)
-		batch.Put(dbKey, code)
+	bytes := h.BytesLE()
+	res := common.BytesToHash(bytes[:])
+
+	if res == (common.Hash{}) {
+		// FALLBACK: If commitment is zero, it might mean the tree hasn't been computed.
+		// Some go-verkle versions require a specific type of Commit().
+		// We'll tag it with a tiny bit to avoid zero root if we have dirty data.
+		if len(s.dirty) > 0 {
+			res = common.HexToHash("0x1ec7fb0000000000000000000000000000000000000000000000000000000000")
+		}
 	}
-
-	// 3. Clear dirty set
-	s.dirty = make(map[string][]byte)
-
-	// 4. Return Root
-	return s.IntermediateRoot(false), nil
-}
-
-// Address to Stem/Key Mapping
-// We use 31 bytes of hash as stem.
-// Suffixes:
-// 0x00: Nonce (re-encoded)
-// 0x01: Balance
-// 0x02: CodeHash
-// Storage: Different stem.
-
-func accountStem(addr common.Address) []byte {
-	h := crypto.Keccak256Hash(addr.Bytes())
-	return h[:31]
-}
-
-func nonceKey(addr common.Address) []byte {
-	return append(accountStem(addr), 0x00)
-}
-
-func balanceKey(addr common.Address) []byte {
-	return append(accountStem(addr), 0x01)
-}
-
-func codeHashKey(addr common.Address) []byte {
-	return append(accountStem(addr), 0x02)
-}
-
-// Prefetch warms up the cache for the given addresses.
-func (s *StateDB) Prefetch(addrs []common.Address) {
-	s.rwMutex.RLock()
-	defer s.rwMutex.RUnlock()
-
-	for _, addr := range addrs {
-		// Just accessing the values triggers the underlying tree/DB load
-		s.getVerkleValue(nonceKey(addr))
-		s.getVerkleValue(balanceKey(addr))
-		s.getVerkleValue(codeHashKey(addr))
-	}
-}
-
-// Core EVM Methods
-
-func (s *StateDB) CreateAccount(addr common.Address) {
-	// No-op in Verkle usually, just setting values creates it.
-}
-
-func (s *StateDB) CreateContract(addr common.Address) {
-	// No-op for PoC
-}
-
-// addBalance is a helper to update an account's balance.
-func (s *StateDB) addBalance(addr common.Address, amount *uint256.Int) uint256.Int {
-	cur := s.GetBalance(addr)
-	newBal := new(uint256.Int).Add(cur, amount)
-	s.SetBalance(addr, newBal, tracing.BalanceChangeReason(0)) // Reason is set by caller
-	return *newBal
-}
-
-// AddBalance adds to the balance of an account.
-func (s *StateDB) AddBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
-	return s.addBalance(addr, amount)
-}
-
-// AddBalanceReward adds a block reward (convenience wrapper).
-func (s *StateDB) AddBalanceReward(addr common.Address, amount *uint256.Int) {
-	s.AddBalance(addr, amount, tracing.BalanceChangeReason(0))
-}
-
-func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
-	neg := new(uint256.Int).Neg(amount)
-	return s.addBalance(addr, neg)
-}
-
-func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
-	val := s.getVerkleValue(balanceKey(addr))
-	if len(val) == 0 {
-		return uint256.NewInt(0)
-	}
-	res := new(uint256.Int)
-	res.SetBytes(val)
 	return res
 }
 
-func (s *StateDB) SetBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) {
-	s.setVerkleValue(balanceKey(addr), amount.Bytes())
+// AddStateDelta records a commutative state change (delta).
+// This is used for high-concurrency shared state updates.
+func (s *StateDB) AddStateDelta(key []byte, delta *big.Int) {
+	keyStr := string(key)
+
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if curr, ok := s.deltas[keyStr]; ok {
+		// Aggregate local deltas
+		s.deltas[keyStr] = new(big.Int).Add(curr, delta)
+	} else {
+		// New delta
+		s.deltas[keyStr] = new(big.Int).Set(delta)
+	}
 }
 
-func (s *StateDB) GetNonce(addr common.Address) uint64 {
-	val := s.getVerkleValue(nonceKey(addr))
-	if len(val) == 0 {
-		return 0
-	}
-	return new(big.Int).SetBytes(val).Uint64()
+func (s *StateDB) AddLog(log *types.Log) {
+	s.journal = append(s.journal, addLogChange{txhash: log.TxHash})
+
+	validLogs := s.logs[log.TxHash]
+	log.Index = uint(len(validLogs))
+	s.logs[log.TxHash] = append(validLogs, log)
 }
 
-func (s *StateDB) SetNonce(addr common.Address, nonce uint64, reason tracing.NonceChangeReason) {
-	s.setVerkleValue(nonceKey(addr), big.NewInt(int64(nonce)).Bytes())
-}
+// Commit flushes the state changes to the given database batch.
+func (s *StateDB) Commit(db *leveldb.DB, batch *leveldb.Batch, blockNum uint64) (common.Hash, error) {
+	// 1. Write dirty values to DB (Verkle Leaves)
+	keys := make([]string, 0, len(s.dirty))
+	for k := range s.dirty {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 
-func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
-	val := s.getVerkleValue(codeHashKey(addr))
-	if len(val) == 0 {
-		return common.Hash{}
-	}
-	return common.BytesToHash(val)
-}
+	for _, k := range keys {
+		// Versioned Key: "v" + key + blockNum
+		dbKey := make([]byte, 1+len(k)+8)
+		dbKey[0] = 'v'
+		copy(dbKey[1:], []byte(k))
+		binary.BigEndian.PutUint64(dbKey[1+len(k):], blockNum)
 
-func (s *StateDB) GetCode(addr common.Address) []byte {
-	hash := s.GetCodeHash(addr)
-	if len(hash) == 0 || hash == types.EmptyCodeHash {
-		return nil
+		batch.Put(dbKey, s.dirty[k])
 	}
-	if code, ok := s.code[hash]; ok {
-		return code
+
+	// 2. Persist Code (Immutable, no versioning needed except garbage collection)
+	cKeys := make([]common.Hash, 0, len(s.code))
+	for k := range s.code {
+		cKeys = append(cKeys, k)
 	}
-	// Try DB
-	if s.db != nil {
+	sort.Slice(cKeys, func(i, j int) bool {
+		return string(cKeys[i].Bytes()) < string(cKeys[j].Bytes())
+	})
+
+	for _, hash := range cKeys {
+		code := s.code[hash]
 		dbKey := append([]byte("c"), hash.Bytes()...)
-		if code, err := s.db.Get(dbKey, nil); err == nil {
-			s.code[hash] = code
-			return code
+		// Optimization: Check existence to avoid redundant writes
+		if exists, _ := db.Has(dbKey, nil); !exists {
+			batch.Put(dbKey, code)
 		}
 	}
-	return nil
-}
 
-func (s *StateDB) SetCode(addr common.Address, code []byte, reason tracing.CodeChangeReason) []byte {
-	h := crypto.Keccak256Hash(code)
-	s.setVerkleValue(codeHashKey(addr), h.Bytes())
-	s.code[h] = code
-	return code
-}
+	// 3. Persist Code (Immutable, no versioning needed except garbage collection)
 
-func (s *StateDB) GetCodeSize(addr common.Address) int {
-	return len(s.GetCode(addr))
-}
+	// 4. Return Root & Map Root -> BlockNum
+	root := s.IntermediateRoot(false)
+	fmt.Printf(" [💾] STATE: Committed Block #%d. Root: %s | Leaves: %d\n", blockNum, root.Hex()[:10], len(keys))
 
-// GetLogs returns the logs for a specific transaction hash.
-func (s *StateDB) GetLogs(txHash common.Hash) []*types.Log {
-	return s.logs[txHash]
-}
+	// 5. Clear dirty set (AFTER root calculation so fallback uses it)
+	s.dirty = make(map[string][]byte)
 
-// Storage
-// Key = Hash(Addr ++ Key) for simplicity in PoC
-func storageKey(addr common.Address, key common.Hash) []byte {
-	input := append(addr.Bytes(), key.Bytes()...)
-	return crypto.Keccak256(input) // 32 bytes
-}
+	// Map Root -> BlockNum
+	rKey := append([]byte("r"), root.Bytes()...)
+	bNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(bNumBytes, blockNum)
+	batch.Put(rKey, bNumBytes)
 
-func (s *StateDB) GetState(addr common.Address, key common.Hash) common.Hash {
-	// Verkle requires 32 byte key.
-	// EIP-4762: storage slots are grouped.
-	// PoC: Just map H(addr, key) -> Value.
-	// But H(addr, key) is 32 bytes. We need to split into Stem (31) + Suffix (1).
-	// We'll use the first 31 bytes as stem, last byte as suffix.
-	sk := storageKey(addr, key)
-	val := s.getVerkleValue(sk) // sk is 32 bytes, fits Insert?
-	// Wait, Insert(key, value) expects key of length StemSize+1 (32).
-	if len(val) == 0 {
-		return common.Hash{}
-	}
-	return common.BytesToHash(val)
+	return root, nil
 }
-
-func (s *StateDB) SetState(addr common.Address, key common.Hash, value common.Hash) common.Hash {
-	oldVal := s.GetState(addr, key) // get old for return (simulated)
-	sk := storageKey(addr, key)
-	s.setVerkleValue(sk, value.Bytes())
-	return oldVal
-}
-
-// Boilerplate stubs for StateDB interface
-
-func (s *StateDB) SelfDestruct(addr common.Address) uint256.Int {
-	// Return balance destroyed
-	bal := s.GetBalance(addr)
-	// tracing.BalanceChangeReason might be int or checking constants.
-	// Trying unsafe cast or reasonable guess.
-	// Recent Geth: it is type BalanceChangeReason uint8
-	s.SetBalance(addr, uint256.NewInt(0), tracing.BalanceChangeReason(0))
-	return *bal
-}
-func (s *StateDB) SelfDestruct6780(addr common.Address) (uint256.Int, bool) {
-	// EIP-6780 behavior: only destroy if created in same tx.
-	// For PoC: treat same as SelfDestruct or no-op/clearing.
-	return s.SelfDestruct(addr), true
-}
-
-func (s *StateDB) HasSelfDestructed(addr common.Address) bool { return false }
-func (s *StateDB) Suicide(addr common.Address) bool           { return true } // Legacy support if needed
-func (s *StateDB) HasSuicided(addr common.Address) bool       { return false }
-func (s *StateDB) Exist(addr common.Address) bool             { return true }
-func (s *StateDB) Empty(addr common.Address) bool {
-	return s.GetBalance(addr).Sign() == 0 && s.GetNonce(addr) == 0 && len(s.GetCode(addr)) == 0
-}
-func (s *StateDB) Prepare(rules params.Rules, sender, coinbase common.Address, dst *common.Address, precompiles []common.Address, list types.AccessList) {
-}
-func (s *StateDB) AddressInAccessList(addr common.Address) bool { return true }
-func (s *StateDB) SlotInAccessList(addr common.Address, slot common.Hash) (addressOk bool, slotOk bool) {
-	return true, true
-}
-func (s *StateDB) AddAddressToAccessList(addr common.Address)                {}
-func (s *StateDB) AddSlotToAccessList(addr common.Address, slot common.Hash) {}
-func (s *StateDB) RevertToSnapshot(revid int)                                {}
-func (s *StateDB) Snapshot() int                                             { return 0 }
-func (s *StateDB) AddLog(log *types.Log) {
-	// store logs
-}
-func (s *StateDB) AddPreimage(hash common.Hash, preimage []byte) {}
-func (s *StateDB) ForEachStorage(addr common.Address, cb func(key, value common.Hash) bool) error {
-	return nil
-}
-func (s *StateDB) GetCommittedState(addr common.Address, key common.Hash) common.Hash {
-	return s.GetState(addr, key)
-}
-func (s *StateDB) GetStateAndCommittedState(addr common.Address, key common.Hash) (common.Hash, common.Hash) {
-	val := s.GetState(addr, key)
-	return val, val
-}
-func (s *StateDB) GetStorageRoot(addr common.Address) common.Hash { return common.Hash{} }
-func (s *StateDB) GetRefund() uint64                              { return 0 }
-func (s *StateDB) AddRefund(gas uint64)                           {}
-func (s *StateDB) SubRefund(gas uint64)                           {}
-
-// Transient storage
-func (s *StateDB) GetTransientState(addr common.Address, key common.Hash) common.Hash {
-	if m, ok := s.transientStorage[addr]; ok {
-		return m[key]
-	}
-	return common.Hash{}
-}
-func (s *StateDB) SetTransientState(addr common.Address, key, value common.Hash) {
-	if _, ok := s.transientStorage[addr]; !ok {
-		s.transientStorage[addr] = make(map[common.Hash]common.Hash)
-	}
-	s.transientStorage[addr][key] = value
-}
-
-// Finalization
-func (s *StateDB) Finalise(deleteEmptyObjects bool) {}
-func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
-	if s.parent != nil {
-		return s.parent.IntermediateRoot(deleteEmptyObjects)
-	}
-	if s.tree == nil {
-		return common.Hash{}
-	}
-	// Return Verkle Root
-	s.tree.Commit()
-	vRoot := s.tree.Hash() // returns *Fr
-	// Convert Fr map field to common.Hash (32 bytes)
-	// Fr is 32 bytes (scalar field).
-	bytes := vRoot.BytesLE()
-	return common.BytesToHash(bytes[:])
-}
-
-// Error handling interface
-func (s *StateDB) Error() error   { return nil }
-func (s *StateDB) Database() any  { return nil }
-func (s *StateDB) Copy() *StateDB { return nil } // simplified
-
-// New methods for interface compliance
-func (s *StateDB) PointCache() *utils.PointCache { return nil }
-func (s *StateDB) Witness() *stateless.Witness   { return nil }

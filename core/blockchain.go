@@ -51,9 +51,13 @@ func NewBlockchain(db *leveldb.DB, cfg *NetworkConfig) *Blockchain {
 			fmt.Printf("DEBUG: Genesis AddBalance: %s = %s\n", addr.Hex(), balance.String())
 			statedb.AddBalance(addr, balance, tracing.BalanceIncreaseGenesisBalance)
 		}
+
+		// Inject Token Program Code (Native Bridge)
+		statedb.SetCode(state.TokenProgramID, TokenProgramBytecode, tracing.CodeChangeReason(0))
+
 		// Commit Genesis State
 		batch := new(leveldb.Batch)
-		root, err := statedb.Commit(db, batch)
+		root, err := statedb.Commit(db, batch, 0)
 		if err != nil {
 			panic(fmt.Sprintf("Failed to commit genesis state: %v", err))
 		}
@@ -64,6 +68,7 @@ func NewBlockchain(db *leveldb.DB, cfg *NetworkConfig) *Blockchain {
 
 		// Update Genesis Header
 		genesis.Header.VerkleRoot = root
+
 		// Re-hash block (create new wrapper to cache hash)
 		genesis = types.NewBlock(genesis.Header, nil)
 
@@ -76,9 +81,22 @@ func NewBlockchain(db *leveldb.DB, cfg *NetworkConfig) *Blockchain {
 		bc.currentBlock = genesis
 		fmt.Printf("\033[1;32m[✨] Initialized Genesis Block\033[0m | Hash: %s | Root: %s\n", genesis.Hash().Hex()[:10], root.Hex()[:10])
 	} else {
-		// Load existing head
+
+		// Load existing
+
 		bc.currentBlock = rawdb.ReadBlock(db, headHash)
 		fmt.Printf("\033[1;34m[⛓] Loaded Chain Head:\033[0m #%d | Hash: %s\n", bc.currentBlock.Header.Number, headHash.Hex()[:10])
+
+		// STARTUP CHECK: Ensure TokenProgram Bytecode is up to date
+		stateDB := state.New(bc.currentBlock.Header.VerkleRoot, db)
+		currCode := stateDB.GetCode(state.TokenProgramID)
+
+		// Log for debugging
+		fmt.Printf("DEBUG: TokenProgram Code Length: OnChain=%d, New=%d\n", len(currCode), len(TokenProgramBytecode))
+
+		if len(currCode) != len(TokenProgramBytecode) {
+			panic("\n\n=================================================================\nCRITICAL: TokenProgram Bytecode Mismatch!\nYou are running OLD Genesis Code (Logs found: 0 issue).\n\nYOU MUST RUN: rm -rf zephyria-chaindata\n\nThen restart the node.\n=================================================================\n")
+		}
 	}
 
 	return bc
@@ -104,6 +122,10 @@ func (bc *Blockchain) AddBlock(b *types.Block, receipts []*types.Receipt) error 
 		if err := rawdb.WriteReceipts(bc.db, b, receipts); err != nil {
 			return err
 		}
+		// Gap 9.3: Index Logs
+		if err := rawdb.IndexLogs(bc.db, hash, b.Header.Number.Uint64(), receipts); err != nil {
+			fmt.Printf("ERROR: Failed to index logs for block %d: %v\n", b.Header.Number.Uint64(), err)
+		}
 	}
 
 	// 3. Write Transaction Indices
@@ -111,8 +133,26 @@ func (bc *Blockchain) AddBlock(b *types.Block, receipts []*types.Receipt) error 
 		return err
 	}
 
-	// 4. Update head if newer
-	if bc.currentBlock == nil || b.Header.Number.Cmp(bc.currentBlock.Header.Number) > 0 {
+	// 4. Update head logic (Fork Choice Rule)
+	// Rule: Longest Chain > Canonical Hash (Tiebreaker)
+	updateHead := false
+	if bc.currentBlock == nil {
+		updateHead = true
+	} else {
+		cmp := b.Header.Number.Cmp(bc.currentBlock.Header.Number)
+		if cmp > 0 {
+			// New Longest Chain
+			updateHead = true
+		} else if cmp == 0 {
+			// Tiebreaker: Prefer Higher Hash (Arbitrary deterministic rule)
+			// This ensures all nodes converge on same block at same height eventually.
+			if b.Hash().Big().Cmp(bc.currentBlock.Hash().Big()) > 0 {
+				updateHead = true
+			}
+		}
+	}
+
+	if updateHead {
 		bc.currentBlock = b
 		rawdb.WriteHeadBlockHash(bc.db, hash)
 	}

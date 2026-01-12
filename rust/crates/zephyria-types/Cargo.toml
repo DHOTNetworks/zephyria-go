@@ -1,0 +1,11 @@
+[package]
+name = "zephyria-types"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["rlp", "serde"] }
+alloy-rlp = { workspace = true, features = ["derive"] }
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+serde = { version = "1.0", features = ["derive"] }
+hex = { workspace = true }

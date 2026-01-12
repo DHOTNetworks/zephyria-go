@@ -1,0 +1,21 @@
+[package]
+name = "zephyria-state"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zephyria-types = { path = "../zephyria-types" }
+# Using reth-libmdbx wrapper for Rust MDBX bindings (simulated via libmdbx-rs since we don't have reth source access directly/easily, assuming crate registry availability)
+# If unavailable, we'd fall back, but 'libmdbx-rs' is standard.
+libmdbx = "0.1" 
+# For Verkle Trees, using 'verkle-trie' (ethereum implementation)
+verkle-trie = { git = "https://github.com/crate-crypto/rust-verkle.git" }
+ipa-multipoint = { git = "https://github.com/crate-crypto/rust-verkle.git" }
+thiserror = { workspace = true }
+anyhow = "1.0"
+serde_json = { workspace = true }
+serde = { workspace = true }
+ark-serialize = "0.4"
+
+[dev-dependencies]
+tempfile = "3.24.0"

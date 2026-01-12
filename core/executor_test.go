@@ -43,12 +43,11 @@ func TestExecutor_Transfer(t *testing.T) {
 	signedTx, _ := ethtypes.SignTx(tx, signer, key)
 
 	header := &types.Header{
-		Number:     big.NewInt(1),
-		Time:       1000,
-		GasLimit:   10000000,
-		Difficulty: big.NewInt(0),
-		Coinbase:   common.HexToAddress("0x99"),
-		BaseFee:    big.NewInt(10),
+		Number:   big.NewInt(1),
+		Time:     1000,
+		GasLimit: 10000000,
+		Coinbase: common.HexToAddress("0x99"),
+		BaseFee:  big.NewInt(10),
 	}
 
 	// Execute

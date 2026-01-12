@@ -1,0 +1,31 @@
+[package]
+name = "zephyria-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zephyria-types = { path = "../zephyria-types" }
+zephyria-state = { path = "../zephyria-state" }
+zephyria-consensus = { path = "../zephyria-consensus" }
+serde = { workspace = true }
+bytes = "1.5"
+verkle-trie = { git = "https://github.com/crate-crypto/rust-verkle.git" }
+alloy-rlp = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = "0.12"
+log = "0.4"
+revm = { workspace = true, features = ["std", "secp256k1", "optional_balance_check", "optional_block_gas_limit", "optional_eip3607"] }
+k256 = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+blst = { workspace = true }
+tempfile = "3.24.0"
+criterion = "0.5"
+
+[[bench]]
+name = "block_import"
+harness = false

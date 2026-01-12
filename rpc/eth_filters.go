@@ -3,6 +3,7 @@ package rpc
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"zephyria/core/rawdb"
 	// Using local types for Block/Header if needed, but logs use geth types
@@ -80,50 +81,98 @@ func (api *PublicEthAPI) GetLogs(ctx context.Context, criteria FilterCriteria) (
 		return nil, fmt.Errorf("query returned more than 2000 results") // Standard-ish error
 	}
 
-	// 2. Iterate and Collect
+	// 2. Determine involved blocks using indices
+	blockSet := make(map[uint64]bool)
+	useIndex := false
+
+	if len(criteria.Addresses) > 0 {
+		useIndex = true
+		for _, addr := range criteria.Addresses {
+			blocks := rawdb.ReadLogIndices(api.bc.Database(), false, addr.Bytes(), uint64(begin), uint64(end))
+			for _, b := range blocks {
+				blockSet[b] = true
+			}
+		}
+	}
+
+	if len(criteria.Topics) > 0 && len(criteria.Topics[0]) > 0 {
+		for _, sub := range criteria.Topics {
+			if len(sub) > 0 {
+				tempSet := make(map[uint64]bool)
+				for _, topic := range sub {
+					blocks := rawdb.ReadLogIndices(api.bc.Database(), true, topic.Bytes(), uint64(begin), uint64(end))
+					for _, b := range blocks {
+						tempSet[b] = true
+					}
+				}
+				// If we already used indices (e.g. from address or previous topic sublist), intersect.
+				// For simplicity here, we just union them and filter later, but intersection is better.
+				if useIndex {
+					// Intersection (approximate for PoC speed)
+					for b := range blockSet {
+						if !tempSet[b] {
+							delete(blockSet, b)
+						}
+					}
+				} else {
+					blockSet = tempSet
+					useIndex = true
+				}
+			}
+		}
+	}
+
+	// 3. Iterate and Collect
 	logs := []*ethtypes.Log{}
 
-	for i := begin; i <= end; i++ {
-		hash := rawdb.ReadCanonicalHash(api.bc.Database(), uint64(i))
+	processBlock := func(i uint64) {
+		hash := rawdb.ReadCanonicalHash(api.bc.Database(), i)
 		if hash == (common.Hash{}) {
-			continue
+			return
 		}
 
 		receipts := rawdb.ReadReceipts(api.bc.Database(), hash)
 		if receipts == nil {
-			continue
+			return
 		}
 
+		cumulativeLogIndex := uint(0)
 		for txIndex, receipt := range receipts {
-			for logIndex, log := range receipt.Logs {
+			for _, log := range receipt.Logs {
 				if filterLog(log, criteria.Addresses, criteria.Topics) {
-					// Add metadata manually (Receipts usually don't store it redundant raw in db)
-					// Verify what ReadReceipts gives. Geth's receipt.Logs usually lack BlockHash/MsgHash details
-					// unless hydrated.
-					// We need to hydrate them.
-					log.BlockNumber = uint64(i)
+					// Add metadata manually
+					log.BlockNumber = i
 					log.BlockHash = hash
-					// TxHash ? We need to lookup tx hash.
-					// rawdb.ReadBlock(hash) -> txs[txIndex]
-					// This is expensive per log. But necessary for standard compliance.
 
-					// Optimization: Load block ONLY if we have a match
 					block := rawdb.ReadBlock(api.bc.Database(), hash)
 					if block != nil && txIndex < len(block.Transactions) {
 						tx := block.Transactions[txIndex]
 						log.TxHash = tx.Hash()
 						log.TxIndex = uint(txIndex)
-						log.Index = uint(logIndex) // Index within block? No, logIndex is typically global in block request or local in tx?
-						// eth_getLogs returns Log Index position in the block.
-						// We need to calculate cumulative index?
-						// Simple impl: just use iteration index?
-						// Correct way: cumulative index across all txs in block.
-						log.Index = uint(logIndex) // TODO: Fix to be block-wide index if needed
+						log.Index = cumulativeLogIndex
 					}
 
 					logs = append(logs, log)
 				}
+				cumulativeLogIndex++
 			}
+		}
+	}
+
+	if useIndex {
+		// Only process matching blocks
+		sortedBlocks := make([]uint64, 0, len(blockSet))
+		for b := range blockSet {
+			sortedBlocks = append(sortedBlocks, b)
+		}
+		sort.Slice(sortedBlocks, func(i, j int) bool { return sortedBlocks[i] < sortedBlocks[j] })
+		for _, b := range sortedBlocks {
+			processBlock(b)
+		}
+	} else {
+		// Full scan
+		for i := begin; i <= end; i++ {
+			processBlock(uint64(i))
 		}
 	}
 

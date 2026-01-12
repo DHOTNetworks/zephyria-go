@@ -20,12 +20,23 @@ import (
 func main() {
 	// Flags
 	var (
-		dataDirFlag = flag.String("datadir", "", "Path to data directory")
-		portFlag    = flag.Int("port", 0, "Base port for P2P (HTTP=port, WS=port+1) or auto-discovery base")
-		networkFlag = flag.String("network", "devnet", "Network name (devnet, testnet, mainnet)")
-		mineFlag    = flag.Bool("mine", false, "Start mining immediately")
-		keyFlag     = flag.String("key", "", "Private key in hex (for validator)")
-		ipcFlag     = flag.String("ipcpath", "", "Path to IPC socket file")
+		dataDirFlag   = flag.String("datadir", "", "Path to data directory")
+		portFlag      = flag.Int("port", 30303, "Network listening port")
+		networkFlag   = flag.String("network", "devnet", "Network name (devnet, testnet, mainnet)")
+		mineFlag      = flag.Bool("mine", false, "Start mining immediately")
+		keyFlag       = flag.String("key", "", "Private key in hex (for validator)")
+		ipcFlag       = flag.String("ipcpath", "", "Path to IPC socket file")
+		bootnodesFlag = flag.String("bootnodes", "", "Comma separated enode URLs for P2P discovery bootstrap")
+
+		// HTTP
+		httpFlag     = flag.Bool("http", true, "Enable the HTTP-RPC server")
+		httpAddrFlag = flag.String("http.addr", "0.0.0.0", "HTTP-RPC server listening interface")
+		httpPortFlag = flag.Int("http.port", 8545, "HTTP-RPC server listening port")
+
+		// WS
+		wsFlag     = flag.Bool("ws", false, "Enable the WS-RPC server")
+		wsAddrFlag = flag.String("ws.addr", "127.0.0.1", "WS-RPC server listening interface")
+		wsPortFlag = flag.Int("ws.port", 8546, "WS-RPC server listening port")
 	)
 	flag.Parse()
 
@@ -45,69 +56,68 @@ func main() {
 		privKey = k
 	} else {
 		// Default logic
-		if netType == core.Mainnet || netType == core.Testnet {
-			// Require key for production? For now warn and use dev key or generated
-			fmt.Println("⚠️  WARNING: No key provided for non-dev network. Using Default Dev Key (UNSAFE).")
+		if netType == core.Devnet || netType == core.Simulation {
+			privKey, _ = crypto.HexToECDSA(core.DefaultDevKey)
+			fmt.Printf("🔑 Loaded Default Dev Key for Devnet/Sim: %s\n", crypto.PubkeyToAddress(privKey.PublicKey).Hex())
+		} else {
+			if netType == core.Mainnet || netType == core.Testnet {
+				fmt.Println("FATAL: Private key required for non-dev networks. Use -key flag.")
+				os.Exit(1)
+			}
+			// Fallback (should not be reached if checks strictly enforce)
+			fmt.Println("FATAL: No key provided.")
+			os.Exit(1)
 		}
-		privKey, _ = crypto.HexToECDSA(core.DefaultDevKey)
-		fmt.Printf("🔑 Loaded Default Dev Key: %s\n", crypto.PubkeyToAddress(privKey.PublicKey).Hex())
 	}
 
-	// Dynamic Port Resolution
-	var baseP2P, httpPort, wsPort int
-
-	if *portFlag > 0 {
-		// If explicit port set, try to adhere to it
-		baseP2P = *portFlag  // Use as P2P match
-		httpPort = *portFlag // Use same for HTTP? Convention usually splits them.
-		// Previous logic: P2P=30303, HTTP=8545.
-		// If user says --port 8545, they probably mean HTTP.
-		// Let's adopt Geth style: --port (P2P), --http.port (HTTP).
-		// But for simplicity here, let's say --port sets HTTP, and we derive others?
-		// Or --port sets P2P, and HTTP is +offset?
-		// The prompt implementation had: p (P2P), http=p-30303+8545.
-		// Let's stick to simple or standard:
-		// If port supplied, use it for HTTP (RPC), and +1 for WS, and random/default for P2P?
-		// Actually, usually --port is P2P in Geth. --http is HTTP.
-		// Since I don't have separate flags, I'll interpret --port as HTTP port (since that's what user interacts with mostly for Remix/Metamask).
-		httpPort = *portFlag
-		wsPort = httpPort + 1
-		baseP2P = httpPort + 21758 // (8545 + 21758 = 30303) roughly.
-		// Or just find available for P2P.
-		baseP2P = findAvailablePort(30303)
-	} else {
-		// Strict Defaults for Dev Reliability
-		httpPort = 8545 // Metamask default
-		wsPort = 8546
-		baseP2P = 30303
+	// Bootnodes
+	var bootnodes []string
+	if *bootnodesFlag != "" {
+		bootnodes = strings.Split(*bootnodesFlag, ",")
 	}
+
+	// Defaults if not set (but flag.Int defaults handle this partially, logic below overrides defaults if needed?)
+	// Actually default in flag ("30303") is fine.
 
 	// Datadir
 	dataDir := *dataDirFlag
 	if dataDir == "" {
-		// Default
 		dataDir = "zephyria-chaindata"
 	}
-	// Ensure absolute or relative is respected? logic handles it.
 
-	// IPC Default
+	// IPC
 	ipcPath := *ipcFlag
 	if ipcPath == "" {
-		// Default to datadir/zephyria.ipc
-		// We need to resolve datadir first if relative to ensure correct placement,
-		// but standard is inside datadir.
 		ipcPath = dataDir + "/zephyria.ipc"
+	}
+
+	// Dynamic Port Switching
+	p2pPort := *portFlag
+	p2pPort = findAvailableUDPPort(p2pPort)
+
+	httpPort := *httpPortFlag
+	if *httpFlag {
+		httpPort = findAvailableTCPPort(httpPort)
+	}
+
+	wsPort := *wsPortFlag
+	if *wsFlag {
+		wsPort = findAvailableTCPPort(wsPort)
 	}
 
 	cfg := &node.Config{
 		DataDir:      dataDir,
-		P2PPort:      baseP2P,
-		HTTPPort:     httpPort,
-		WSPort:       wsPort,
+		P2PPort:      p2pPort,
+		HTTPHost:     *httpAddrFlag,
+		HTTPPort:     httpPort, // Use dynamic port
+		HTTPEnabled:  *httpFlag,
+		WSHost:       *wsAddrFlag,
+		WSPort:       wsPort, // Use dynamic port
+		WSEnabled:    *wsFlag,
 		IPCPath:      ipcPath,
 		Network:      netType,
 		ValidatorKey: privKey,
-		Bootnodes:    []string{},
+		Bootnodes:    bootnodes,
 	}
 
 	n := node.New(cfg)
@@ -124,6 +134,7 @@ func main() {
 
 	fmt.Printf("\n✅ Node Running at: %s\n", dataDir)
 	fmt.Printf("Endpoints: HTTP=:%d | WS=:%d | P2P=:%d\n", cfg.HTTPPort, cfg.WSPort, cfg.P2PPort)
+	fmt.Printf("Enode: %s\n", n.EnodeURL()) // Show Bootnode Address
 	fmt.Println("Commands: info, addkey <hex>, stake <amt> <addr>, unstake <addr>, exit")
 
 	// 2. Interactive Loop (non-blocking if mining, but scanner blocks main thread which is fine)
@@ -131,7 +142,8 @@ func main() {
 	for {
 		fmt.Print("> ")
 		if !scanner.Scan() {
-			break
+			// If stdin closed (e.g. background/headless), block forever
+			select {}
 		}
 		line := scanner.Text()
 		parts := strings.Fields(line)
@@ -246,10 +258,26 @@ func main() {
 	}
 }
 
-// findAvailablePort checks if a port is in use and increments until availability.
-func findAvailablePort(start int) int {
+// findAvailableTCPPort checks if a port is in use and increments until availability.
+func findAvailableTCPPort(start int) int {
 	for port := start; port < start+100; port++ {
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+			return port
+		}
+	}
+	return start // Fallback
+}
+
+// findAvailableUDPPort checks if a port is in use and increments until availability.
+func findAvailableUDPPort(start int) int {
+	for port := start; port < start+100; port++ {
+		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			continue
+		}
+		ln, err := net.ListenUDP("udp", addr)
 		if err == nil {
 			ln.Close()
 			return port

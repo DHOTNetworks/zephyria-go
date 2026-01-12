@@ -1,0 +1,18 @@
+[package]
+name = "zephyria-node"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zephyria-types = { path = "../zephyria-types" }
+zephyria-core = { path = "../zephyria-core" }
+zephyria-state = { path = "../zephyria-state" }
+zephyria-consensus = { path = "../zephyria-consensus" }
+zephyria-p2p = { path = "../zephyria-p2p" }
+
+tokio = { workspace = true, features = ["full"] }
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+libp2p = "0.53"

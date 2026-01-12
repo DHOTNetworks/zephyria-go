@@ -1,6 +1,8 @@
 package rpc
 
 import (
+	"fmt"
+	"os"
 	"zephyria/core"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -25,19 +27,22 @@ func NewPublicNetAPI(bc *core.Blockchain, p2p PeerManager) *PublicNetAPI {
 	return &PublicNetAPI{bc, p2p}
 }
 
-func (api *PublicNetAPI) Listening() bool {
-	return true
+func (api *PublicNetAPI) Listening() (bool, error) {
+	fmt.Fprintf(os.Stderr, "[RPC] net_listening called\n")
+	return true, nil
 }
 
-func (api *PublicNetAPI) PeerCount() hexutil.Uint {
+func (api *PublicNetAPI) PeerCount() (hexutil.Uint, error) {
+	fmt.Fprintf(os.Stderr, "[RPC] net_peerCount called\n")
 	if api.p2p == nil {
-		return 0
+		return 0, nil
 	}
-	return hexutil.Uint(api.p2p.PeerCount())
+	return hexutil.Uint(api.p2p.PeerCount()), nil
 }
 
-func (api *PublicNetAPI) Version() string {
-	return api.bc.Config().ChainID.String()
+func (api *PublicNetAPI) Version() (string, error) {
+	fmt.Fprintf(os.Stderr, "[RPC] net_version called\n")
+	return api.bc.Config().ChainID.String(), nil
 }
 
 // ---------------------------------------------------------------------

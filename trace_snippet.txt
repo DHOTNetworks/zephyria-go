@@ -1,0 +1,19 @@
+🚀 Starting Zephyria Interactive Node...
+[1;34m[⛓] Loaded Chain Head:[0m #234588 | Hash: 0x3ab13688
+[1;32m[🛡] Genesis Verified:[0m 0x3cdad399
+[Keystore] Imported key for 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+[1;35m[🌐] QUIC P2P Server listening on [::]:30303 (UDP) | ID: 8318535b[0m
+[1;35m[🌐] QUIC P2P Server listening on :30303 | ID: 8318535b[0m
+[Discovery] Loaded 0 peers from DB
+Loaded Chain Head: #234588 | State Root: 0x2f6516e9
+RPC Server listening on 0.0.0.0:8545
+IPC endpoint opened at bench_data/zephyria.ipc
+Miner Started
+⛏️  Mining Started
+
+✅ Node Running at: bench_data
+Endpoints: HTTP=:8545 | WS=:8546 | P2P=:30303
+[⏲] VDF Metronome Started (Iters=50000)
+Enode: enode://8318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed753547f11ca8696646f2f3acb08e31016afac23e630c5d11f59f61fef57b0d2aa5@127.0.0.1:30303
+Commands: info, addkey <hex>, stake <amt> <addr>, unstake <addr>, exit
+> 

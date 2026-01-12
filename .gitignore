@@ -10,9 +10,13 @@ bench_bin
 storage-test/
 tmp*/
 zephyria-chaindata/
-
 # Dependencies
 # vendor/ (Removed for custom protocol patches)
+rust/target/
+benchmark_tool/node_modules/
+rust/target/debug/.fingerprint/*
+rust/target/release/.fingerprint/*
+
 
 # OS files
 .DS_Store

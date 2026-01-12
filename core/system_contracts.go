@@ -7,107 +7,127 @@ import (
 
 	"zephyria/state"
 
+	ztypes "zephyria/types"
+
 	"github.com/ethereum/go-ethereum/common"
 	ethcore "github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/holiman/uint256"
 )
 
+const EpochLength = 100
+
+// ProcessEpochBoundary handles end-of-epoch system logic like Randomness persistence.
+func (e *Executor) ProcessEpochBoundary(statedb *state.StateDB, header *ztypes.Header) {
+	if header.Number.Uint64()%EpochLength != 0 {
+		return
+	}
+
+	// ---------------------------------------------------------
+	// RANDOMNESS PERSISTENCE
+	// ---------------------------------------------------------
+	// At epoch boundary, we save the VDF Output (Randomness) to the state.
+	// The VDF Output is the first 160 bytes of ExtraData (5 checkpoints * 32 bytes).
+	// Or simpler: The "Seed" for next epoch is the LAST VDF Checkpoint of this block.
+
+	// ExtraData Layout: [VDF (160)] [VRF (96)] ...
+	// We expect at least 160 bytes.
+	if len(header.ExtraData) < 160 {
+		return
+	}
+
+	// Last Checkpoint (Seed) is bytes [128:160]
+	seedBytes := header.ExtraData[128:160]
+
+	randomnessAddr := e.netCfg.Params.RandomnessAddr
+
+	// Key 0: Current Epoch Seed (The one valid for *next* epoch calculation)
+	zeroKey := common.Hash{} // Key 0
+	val := common.BytesToHash(seedBytes)
+	statedb.SetState(randomnessAddr, zeroKey, val)
+
+	// Audit Trail: Key(Epoch) = Seed
+	epoch := header.Number.Uint64() / EpochLength
+	epochKey := common.BigToHash(new(big.Int).SetUint64(epoch))
+	statedb.SetState(randomnessAddr, epochKey, val)
+
+	fmt.Printf("System: Epoch %d Boundary. Randomness Seed Saved: %s\n", epoch, val.Hex())
+}
+
 // ProcessSystemContracts checks if a transaction is destined for a system contract and executes native logic.
-func (e *Executor) ProcessSystemContracts(overlayDB *state.StateDB, msg *ethcore.Message, tx *types.Transaction, header *params.ChainConfig) {
+func (e *Executor) ProcessSystemContracts(overlayDB *state.StateDB, msg *ethcore.Message, tx *types.Transaction, header *ztypes.Header) {
 	// ---------------------------------------------------------
 	// STAKING CONTRACT LOGIC (Native Go Implementation)
 	// ---------------------------------------------------------
 	stakingAddr := e.netCfg.Params.StakingAddr
 	rewardAddr := e.netCfg.Params.RewardAddr
-	validatorAddr := e.netCfg.Params.ValidatorAddr
 
 	sender := msg.From
 
 	if msg.To != nil && *msg.To == stakingAddr {
 		// 1. DEPOSIT (Stake)
 		if msg.Value.Sign() > 0 {
-			// Store Stake: State[StakingAddr][SenderHash] = Value
-			valBytes := common.BigToHash(msg.Value)
-			key := common.BytesToHash(sender.Bytes()) // Simple key
-			overlayDB.SetState(stakingAddr, key, valBytes)
+			// Extract BLS Key from Data (Expected: 48 bytes)
+			var blsKey []byte
+			if len(msg.Data) == 48 {
+				blsKey = msg.Data
+			}
 
-			// Update ValidatorSet (0x3000): Iterable List
-			// Check if already active
-			existingIndex := overlayDB.GetState(validatorAddr, key)
-			if (existingIndex == common.Hash{}) {
-				// 1. Increment Count
-				countHash := common.Hash{} // Key 0
-				currentCount := overlayDB.GetState(validatorAddr, countHash).Big()
-				newCount := new(big.Int).Add(currentCount, big.NewInt(1))
-				overlayDB.SetState(validatorAddr, countHash, common.BigToHash(newCount))
-
-				// 2. Store Index -> Address
-				// Key = Index
-				indexKey := common.BigToHash(newCount)
-				overlayDB.SetState(validatorAddr, indexKey, key)
-
-				// 3. Store Address -> Index
-				// Key = AddressHash
-				overlayDB.SetState(validatorAddr, key, indexKey)
-
-				fmt.Printf("System: New Validator Joined! %s (Index %s)\n", sender.Hex(), newCount)
+			// If already a staker, it's a top-up
+			info, _ := e.validatorRegistry.GetValidatorInfo(overlayDB, sender)
+			if info != nil {
+				if err := e.validatorRegistry.AddStake(overlayDB, sender, msg.Value); err != nil {
+					fmt.Printf("System: Validator Stake Top-up Failed: %v\n", err)
+				} else {
+					fmt.Printf("System: Validator %s Top-up Stake. New Total: %s\n", sender.Hex(), info.Stake.String())
+				}
 			} else {
-				fmt.Printf("System: Validator %s Top-up Stake\n", sender.Hex())
+				// New Validator Registration
+				if len(blsKey) != 48 {
+					fmt.Printf("WARNING: Staking tx from %s has no/invalid BLS key! Registration rejected.\n", sender.Hex())
+					return
+				}
+				// Default commission: 10% (1000 basis points)
+				if err := e.validatorRegistry.RegisterValidator(overlayDB, sender, msg.Value, blsKey, 1000, header.Number.Uint64()); err != nil {
+					fmt.Printf("System: Validator Registration Failed: %v\n", err)
+				}
 			}
 		}
 
 		// 2. WITHDRAW (Unstake)
 		if string(tx.Data()) == "UNSTAKE" {
-			key := common.BytesToHash(sender.Bytes())
-			storedVal := overlayDB.GetState(stakingAddr, key)
+			info, err := e.validatorRegistry.GetValidatorInfo(overlayDB, sender)
+			if err != nil {
+				fmt.Printf("System: Unstake Attempt by non-validator %s\n", sender.Hex())
+				return
+			}
 
-			if (storedVal != common.Hash{}) {
-				amount := storedVal.Big()
+			// Request unstake of the ENTIRE amount for simplicity in this implementation
+			unlockBlock, err := e.validatorRegistry.RequestUnstake(overlayDB, sender, info.Stake, header.Number.Uint64())
+			if err != nil {
+				fmt.Printf("System: Unstake Request Failed for %s: %v\n", sender.Hex(), err)
+			} else {
+				fmt.Printf("System: Unstake Queued for %s. Unlock at %d\n", sender.Hex(), unlockBlock)
+			}
+		}
 
-				// Refund: StakingAddr -> Sender
-				amt256, _ := uint256.FromBig(amount)
+		// 3. UPDATE METADATA (METADATA:[Name]:[Website]:[Commission])
+		dataStr := string(msg.Data)
+		if strings.HasPrefix(dataStr, "METADATA:") {
+			parts := strings.Split(dataStr, ":")
+			if len(parts) >= 4 {
+				name := parts[1]
+				website := parts[2]
+				commissionVal := uint16(0)
+				fmt.Sscanf(parts[3], "%d", &commissionVal)
 
-				// Security: Ensure StakingAddr has enough balance
-				if overlayDB.GetBalance(stakingAddr).Cmp(amt256) >= 0 {
-					overlayDB.SubBalance(stakingAddr, amt256, tracing.BalanceChangeReason(0))
-					overlayDB.AddBalance(sender, amt256, tracing.BalanceChangeReason(0))
-
-					// Swap-and-Pop Removal
-					// 1. Get Index of Validator to remove
-					indexToRemove := overlayDB.GetState(validatorAddr, key).Big()
-
-					// 2. Get Last Index (Count)
-					countHash := common.Hash{}
-					currentCount := overlayDB.GetState(validatorAddr, countHash).Big()
-
-					// 3. If not last, swap last element to this position
-					if indexToRemove.Cmp(currentCount) < 0 {
-						lastIndexKey := common.BigToHash(currentCount)
-						lastAddrHash := overlayDB.GetState(validatorAddr, lastIndexKey) // Address of last guy
-
-						// Move last guy to empty slot
-						slotKey := common.BigToHash(indexToRemove)
-						overlayDB.SetState(validatorAddr, slotKey, lastAddrHash)
-
-						// Update last guy's pointer
-						overlayDB.SetState(validatorAddr, lastAddrHash, slotKey)
-					}
-
-					// 4. Delete Last Slot and Decrement Count
-					zero := common.Hash{}
-					overlayDB.SetState(validatorAddr, common.BigToHash(currentCount), zero) // Clear last slot
-
-					newCount := new(big.Int).Sub(currentCount, big.NewInt(1))
-					overlayDB.SetState(validatorAddr, countHash, common.BigToHash(newCount))
-
-					// 5. Cleanup Removed Validator
-					overlayDB.SetState(stakingAddr, key, zero)
-					overlayDB.SetState(validatorAddr, key, zero) // Clear pointer
-
-					fmt.Printf("System: Validator Left: %s\n", sender.Hex())
+				if err := e.validatorRegistry.UpdateValidator(overlayDB, sender, name, website, &commissionVal); err != nil {
+					fmt.Printf("System: Metadata Update Failed: %v\n", err)
+				} else {
+					fmt.Printf("System: Validator %s Metadata Updated: %s | %s | %d%%\n",
+						sender.Hex(), name, website, commissionVal/100)
 				}
 			}
 		}
@@ -120,16 +140,12 @@ func (e *Executor) ProcessSystemContracts(overlayDB *state.StateDB, msg *ethcore
 		// Logic: RewardAddr acts as a central vault.
 		// Only the Coinbase (Miner) can trigger a withdrawal from it.
 		// This prevents unauthorized draining of the reward pool.
-		// Note: header.Coinbase is not passed here easily unless we change signature.
-		// Assuming we pass correct context or simplified check for now.
-		// Or assume msg.From check is enough if we trust execution flow.
-		// Wait, we need 'header' from ApplyBlock context, but signature above has *params.ChainConfig (wrong type name usage in my proposed func sig?).
-		// Let's rely on standard logic:
 
-		// For now, disabling strict coinbase check in this extracted function to keep signature simple,
-		// OR we pass the coinbase address as argument. Let's pass extra arg?
-		// Actually, let's keep it simple. If msg.From is "authorized", we proceed.
-		// Real impl needs AccessControl.
+		// SECURITY FIX: Enforce Coinbase check
+		if header != nil && msg.From != header.Coinbase {
+			fmt.Printf("SECURITY: Unauthorized Reward Attempt from %s (Expected %s)\n", msg.From.Hex(), header.Coinbase.Hex())
+			return
+		}
 
 		if msg.Value.Sign() == 0 && len(tx.Data()) > 0 {
 			// Format: "REWARD:<addr>:<amount_hex>"
@@ -152,6 +168,60 @@ func (e *Executor) ProcessSystemContracts(overlayDB *state.StateDB, msg *ethcore
 					}
 				}
 			}
+
 		}
+
 	}
+
+	// ---------------------------------------------------------
+	// SLASHING CONTRACT LOGIC (Native Go)
+	// ---------------------------------------------------------
+	if err := e.ProcessSlashing(overlayDB, msg, tx, header); err != nil {
+		fmt.Printf("System: Slashing Process Failed: %v\n", err)
+	}
+}
+
+// ProcessMatureUnstakes checks the queue for unlocked funds and refunds them.
+func (e *Executor) ProcessMatureUnstakes(statedb *state.StateDB, header *ztypes.Header) {
+	processed := e.validatorRegistry.ProcessMatureUnstakes(statedb, header.Number.Uint64())
+	if processed > 0 {
+		fmt.Printf("System: Processed %d mature unstake refunds\n", processed)
+	}
+}
+
+// ProcessSlashing handles a slashing proof transaction.
+// It verifies the proof and slashes the validator.
+func (e *Executor) ProcessSlashing(overlayDB *state.StateDB, msg *ethcore.Message, tx *types.Transaction, header *ztypes.Header) error {
+	// Format: "SLASH:<EvidenceRLP>"
+	// For now, we continue with the simplified format "SLASH:<AddressHex>" but use the registry
+	data := string(msg.Data)
+	if strings.HasPrefix(data, "SLASH:") {
+		parts := strings.Split(data, ":")
+		if len(parts) == 2 && common.IsHexAddress(parts[1]) {
+			targetAddr := common.HexToAddress(parts[1])
+
+			// In a real implementation, we would decode the evidence here.
+			// For this PoC, we use empty evidence.
+			return e.validatorRegistry.SlashValidator(overlayDB, targetAddr, ztypes.SlashingDoubleSign, nil, header.Number.Uint64(), msg.From)
+		}
+	} else if strings.HasPrefix(data, "SLASH_PROOF:") {
+		// Expecting RLP-encoded SlashingProof after the prefix
+		proofData := msg.Data[len("SLASH_PROOF:"):]
+		var proof ztypes.SlashingProof
+		if err := rlp.DecodeBytes(proofData, &proof); err != nil {
+			return fmt.Errorf("failed to decode slashing proof: %v", err)
+		}
+
+		// Verify Proof logic (already in engine, but here we are in executor)
+		// We can call engine.HandleSlashingProof if we have access, or just registry logic
+		return e.validatorRegistry.SlashValidator(
+			overlayDB,
+			proof.ValidatorAddr,
+			proof.ProofType,
+			proof.Evidence,
+			header.Number.Uint64(),
+			msg.From,
+		)
+	}
+	return nil
 }

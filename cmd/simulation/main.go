@@ -86,28 +86,34 @@ func main() {
 	fmt.Println("✅ Network Stabilized. Sending Traffic...")
 
 	// 6. Traffic Generation (Send to Node 0, verified by all)
-	// Send 1000 Txs from Val 0 to Random
+	// Send 100 Txs from Val 0 to Random
 	signer := ethtypes.LatestSigner(core.GetNetworkConfig(core.Simulation).ChainConfig())
 	val0Key, _ := crypto.HexToECDSA(valKeys[0])
+	val0Addr := crypto.PubkeyToAddress(val0Key.PublicKey)
 
 	go func() {
-		for i := 0; i < 100; i++ {
-			nonce := uint64(i) // Simple nonce tracking (assuming fresh state)
-			// Note: Use state nonce in real code, but for fast blast we assume 0..N
-			// Actually, we should ask node for nonce ideally.
-			// For simulation speed, we track locally.
+		// Fetch initial nonce once
+		currentNonce := nodes[0].NonceAt(val0Addr)
 
-			tx := ethtypes.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(100), 21000, big.NewInt(100), nil)
+		for i := 0; i < 100; i++ {
+			// Local sequential tracking
+			nonce := currentNonce
+			currentNonce++
+
+			// Use 2 Gwei gas price (Base Fee is 1 Gwei floor)
+			gasPrice := big.NewInt(2_000_000_000)
+
+			tx := ethtypes.NewTransaction(nonce, common.HexToAddress("0xdeadbeef"), big.NewInt(100), 21000, gasPrice, nil)
 			signedTx, _ := ethtypes.SignTx(tx, signer, val0Key)
 
 			nodes[0].SubmitTx(signedTx)
 
 			// Distributed load? Send some to Node 1 too
-			if i%2 == 0 {
-				nodes[1].SubmitTx(signedTx) // Sending same tx to multiple is fine, gossip handles it
+			if i%4 == 0 {
+				nodes[1].SubmitTx(signedTx)
 			}
 
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(1 * time.Second) // Slower more stable pace
 		}
 	}()
 

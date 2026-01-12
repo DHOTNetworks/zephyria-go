@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zephyria Token Tester</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #0f172a;
+            color: #f8fafc;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        .container {
+            background: #1e293b;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            width: 400px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 1.5rem;
+            color: #38bdf8;
+            text-align: center;
+        }
+
+        input,
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: #0f172a;
+            color: white;
+            box-sizing: border-box;
+        }
+
+        button {
+            background: #38bdf8;
+            color: #0f172a;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+            border: none;
+        }
+
+        button:hover {
+            background: #0ea5e9;
+        }
+
+        .status {
+            margin-top: 1rem;
+            font-size: 0.875rem;
+            color: #94a3b8;
+            text-align: center;
+            word-break: break-all;
+        }
+
+        .balance {
+            font-size: 2rem;
+            text-align: center;
+            margin: 1rem 0;
+            font-weight: bold;
+        }
+
+        .label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.25rem;
+            display: block;
+        }
+
+        .header-addr {
+            font-size: 0.8rem;
+            color: #94a3b8;
+            text-align: center;
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <h1>Zephyria Token</h1>
+
+        <button id="connectBtn">Connect Wallet</button>
+
+        <div id="app" style="display:none;">
+            <div class="header-addr" id="userAddress"></div>
+
+            <!-- Token Selection -->
+            <span class="label">Token Address (Mint)</span>
+            <input type="text" id="tokenAddress" placeholder="0x... (Default: 0x...5000)"
+                value="0x0000000000000000000000000000000000005000" />
+            <div class="balance" id="tokenBalance">0.00 ZT</div>
+            <button id="refreshBtn" style="background:#475569; margin-bottom:0.5rem;">Refresh Balance</button>
+
+            <hr style="border-color: #334155; margin: 1.5rem 0;">
+
+            <!-- Create Token -->
+            <span class="label">Create New Token</span>
+            <div style="display:flex; gap:0.5rem;">
+                <input type="text" id="newTokenName" placeholder="Name" style="flex:1;">
+                <input type="text" id="newTokenSymbol" placeholder="Sym" style="width:60px;">
+            </div>
+            <button id="createBtn" style="background: #22c55e; color:white;">Create Token</button>
+
+            <hr style="border-color: #334155; margin: 1.5rem 0;">
+
+            <!-- Transfer -->
+            <span class="label">Transfer Tokens</span>
+            <input type="text" id="recipient" placeholder="Recipient Address (0x...)" />
+            <input type="number" id="amount" placeholder="Amount" />
+            <button id="transferBtn">Transfer</button>
+        </div>
+
+        <div class="status" id="status"></div>
+    </div>
+
+    <script>
+        const GENESIS_TOKEN = "0x0000000000000000000000000000000000005000";
+        const ABI = [
+            "function balanceOf(address owner) view returns (uint256)",
+            "function transfer(address to, uint256 amount) returns (bool)",
+            "function createToken(string name, string symbol, uint8 decimals) returns (address)"
+        ];
+
+        let provider, signer, contract;
+
+        async function connect() {
+            // Wait for window load to ensure injection finished (rare race condition)
+            if (document.readyState === "complete") {
+                tryConnect();
+            } else {
+                window.addEventListener('load', tryConnect);
+            }
+        }
+
+        async function tryConnect() {
+            // Check for window.ethereum
+            if (typeof window.ethereum !== 'undefined') {
+                try {
+                    setStatus("Requesting accounts...");
+                    await window.ethereum.request({ method: 'eth_requestAccounts' });
+
+                    provider = new ethers.BrowserProvider(window.ethereum);
+                    signer = await provider.getSigner();
+                    const address = await signer.getAddress();
+
+                    // Check Chain ID
+                    const network = await provider.getNetwork();
+                    console.log("Connected to chain:", network.chainId);
+
+                    document.getElementById('connectBtn').style.display = 'none';
+                    document.getElementById('app').style.display = 'block';
+                    document.getElementById('userAddress').innerText = address;
+
+                    initContract();
+                    updateBalance(address);
+                    setStatus("Connected to Chain ID " + network.chainId);
+                } catch (error) {
+                    console.error(error);
+                    setStatus("Connection Error: " + error.message);
+                }
+            } else {
+                setStatus("MetaMask (window.ethereum) is NOT found. Please install MetaMask Extension.");
+            }
+        }
+
+        function initContract() {
+            let addr = document.getElementById('tokenAddress').value;
+            if (!addr) addr = GENESIS_TOKEN;
+            // If createToken is called, we call it on Generic Token Program (Genesis)
+            // If transfer is called, we call it on the specific Mint Address.
+            contract = new ethers.Contract(addr, ABI, signer);
+        }
+
+        async function updateBalance(address) {
+            initContract();
+            try {
+                const bal = await contract.balanceOf(address);
+                document.getElementById('tokenBalance').innerText = ethers.formatUnits(bal, 0);
+            } catch (e) {
+                console.error(e);
+                // setStatus("Balance Fetch Failed (" + e.code + ")");
+                // Might fail if contract doesn't exist yet
+                document.getElementById('tokenBalance').innerText = "?";
+            }
+        }
+
+        async function createNewToken() {
+            // Always create via Genesis Program
+            const factory = new ethers.Contract(GENESIS_TOKEN, ABI, signer);
+            const name = document.getElementById('newTokenName').value || "MyToken";
+            const sym = document.getElementById('newTokenSymbol').value || "MTK";
+
+            try {
+                // 3. Predict Address Deterministically (Remix Style)
+                // The TokenProgram (Factory) creates the token. 
+                // Address = keccak256(rlp([factoryAddress, factoryNonce]))
+
+                const factoryAddress = "0x0000000000000000000000000000000000005000";
+                const factoryNonce = await provider.getTransactionCount(factoryAddress);
+                console.log("Factory Nonce:", factoryNonce);
+
+                const predictedAddress = ethers.getCreateAddress({
+                    from: factoryAddress,
+                    nonce: factoryNonce
+                });
+                console.log("Predicted Token Address:", predictedAddress);
+
+                // 4. Update UI immediately (Optimistic)
+                setStatus("Token Creating... Expected Address: " + predictedAddress);
+
+                // 5. Send Transaction
+                const tx = await factory.createToken(name, sym, 18);
+                setStatus("Tx Sent: " + tx.hash + " (Waiting for confirmation...)");
+
+                const receipt = await tx.wait();
+
+                // 6. Confirm
+                setStatus("Token Created! Address: " + predictedAddress);
+                document.getElementById('tokenAddress').value = predictedAddress;
+                initContract();
+                updateBalance(await signer.getAddress());
+
+            } catch (e) {
+                console.error(e);
+                setStatus("Create Failed: " + e.message);
+            }
+        }
+
+        async function transfer() {
+            initContract(); // Use the address in the input box
+            const to = document.getElementById('recipient').value;
+            const amount = document.getElementById('amount').value;
+            if (!to || !amount) return;
+
+            try {
+                setStatus("Sending transaction...");
+                const tx = await contract.transfer(to, amount);
+                setStatus("Tx Sent: " + tx.hash);
+                await tx.wait();
+                setStatus("Transfer Confirmed!");
+                updateBalance(await signer.getAddress());
+            } catch (e) {
+                console.error(e);
+                setStatus("Transfer Failed: " + e.message);
+            }
+        }
+
+        function setStatus(msg) {
+            document.getElementById('status').innerText = msg;
+        }
+
+        document.getElementById('connectBtn').onclick = connect;
+        document.getElementById('transferBtn').onclick = transfer;
+        document.getElementById('createBtn').onclick = createNewToken;
+        document.getElementById('refreshBtn').onclick = async () => updateBalance(await signer.getAddress());
+        document.getElementById('tokenAddress').onchange = async () => updateBalance(await signer.getAddress());
+
+    </script>
+
+</body>
+
+</html>

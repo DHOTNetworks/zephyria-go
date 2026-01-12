@@ -27,7 +27,7 @@ func TestHBBFT_SimulateRound(t *testing.T) {
 	// Generate a private key for the test engine (mocking one of the validators)
 	privKey, _ := crypto.HexToECDSA("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
 
-	engine := NewZelius(validators, privKey)
+	engine := NewZelius(validators, privKey, nil)
 
 	parent := &types.Block{
 		Header: &types.Header{
@@ -40,7 +40,7 @@ func TestHBBFT_SimulateRound(t *testing.T) {
 	// Input txs
 	txs := []*ethtypes.Transaction{} // empty for simplicity or mock
 
-	block, err := engine.SimulateRound(parent, txs, nil)
+	block, err := engine.SimulateRound(parent, txs, nil, nil)
 	if err != nil {
 		t.Fatalf("SimulateRound failed: %v", err)
 	}
