@@ -1,0 +1,28 @@
+gen-stencils
++- run exe stencil_generator (src/vm/generated/stencils.zig)
+   +- compile exe stencil_generator Debug native 2 errors
+src/vm/generator/extract.zig:155:15: error: unused local constant
+        const str_base = symtab.stroff;
+              ^~~~~~~~
+src/vm/generator/extract.zig:35:54: error: struct 'array_list.Aligned(extract.Extractor.ExtractionResult,null)' has no member named 'init'
+        var results = std.ArrayList(ExtractionResult).init(self.allocator);
+                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/array_list.zig:606:12: note: struct declared here
+    return struct {
+           ^~~~~~
+referenced by:
+    main: src/vm/generator/main.zig:33:41
+    callMain [inlined]: /opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/start.zig:627:37
+    callMainWithArgs [inlined]: /opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/start.zig:587:20
+    main: /opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/start.zig:602:28
+    1 reference(s) hidden; use '-freference-trace=5' to see all references
+error: the following command failed with 2 compilation errors:
+/opt/homebrew/Cellar/zig/0.15.2/bin/zig build-exe -ODebug -Mroot=/Users/karan/zephyria/zig/src/vm/generator/main.zig --cache-dir .zig-cache --global-cache-dir /Users/karan/.cache/zig --name stencil_generator --zig-lib-dir /opt/homebrew/Cellar/zig/0.15.2/lib/zig/ --listen=-
+
+Build Summary: 1/4 steps succeeded; 1 failed
+gen-stencils transitive failure
++- run exe stencil_generator (src/vm/generated/stencils.zig) transitive failure
+   +- compile exe stencil_generator Debug native 2 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/0cde4b2747f6117829fa01eaa9f58de2/build /opt/homebrew/Cellar/zig/0.15.2/bin/zig /opt/homebrew/Cellar/zig/0.15.2/lib/zig /Users/karan/zephyria/zig .zig-cache /Users/karan/.cache/zig --seed 0x485a5830 -Zf126fe2a980a541b gen-stencils

@@ -1,0 +1,16 @@
+test-jit
++- run exe test_jit
+   +- compile exe test_jit Debug native 1 errors
+src/vm/jit_compiler.zig:279:5: error: expected statement, found 'pub'
+    pub fn getFunction(self: *JitCompiler) *const anyopaque {
+    ^~~
+error: the following command failed with 1 compilation errors:
+/opt/homebrew/Cellar/zig/0.15.2/bin/zig build-exe -ODebug --dep stencils --dep jit_compiler -Mroot=/Users/karan/zephyria/zig/src/vm/tests/test_jit.zig -Mstencils=.zig-cache/o/899eeb472fab41f4d594e8a37594df15/src/vm/generated/stencils.zig --dep stencils -Mjit_compiler=/Users/karan/zephyria/zig/src/vm/jit_compiler.zig -lc --cache-dir .zig-cache --global-cache-dir /Users/karan/.cache/zig --name test_jit --zig-lib-dir /opt/homebrew/Cellar/zig/0.15.2/lib/zig/ --listen=-
+
+Build Summary: 4/7 steps succeeded; 1 failed
+test-jit transitive failure
++- run exe test_jit transitive failure
+   +- compile exe test_jit Debug native 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/26ef35733e12a97b045e2da944dce7ed/build /opt/homebrew/Cellar/zig/0.15.2/bin/zig /opt/homebrew/Cellar/zig/0.15.2/lib/zig /Users/karan/zephyria/zig .zig-cache /Users/karan/.cache/zig --seed 0xa9fd6e83 -Z9b2133ef8b56297a test-jit
