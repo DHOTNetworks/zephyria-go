@@ -1,0 +1,23 @@
+install
++- install zephyria
+   +- compile exe zephyria Debug native 1 errors
+src/core/account.zig:146:17: error: root source file struct 'json' has no member named 'stringify'
+    try std.json.stringify(keystore, .{}, out.writer(allocator));
+        ~~~~~~~~^~~~~~~~~~
+/opt/homebrew/Cellar/zig/0.15.2/lib/zig/std/json.zig:1:1: note: struct declared here
+//! JSON parsing and stringification conforming to RFC 8259. https://datatracker.ietf.org/doc/html/rfc8259
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    handleAccountCommand: src/main.zig:137:46
+    main: src/main.zig:39:33
+    4 reference(s) hidden; use '-freference-trace=6' to see all references
+error: the following command failed with 1 compilation errors:
+/opt/homebrew/Cellar/zig/0.15.2/bin/zig build-exe -lz -ODebug --dep storage --dep vm --dep consensus --dep p2p --dep rpc --dep core --dep node --dep utils -Mroot=/Users/karan/zephyria/zig/src/main.zig --dep verkle-crypto -Mstorage=/Users/karan/zephyria/zig/src/storage/mod.zig --dep core -Mvm=/Users/karan/zephyria/zig/src/vm/main.zig --dep blst --dep core -Mconsensus=/Users/karan/zephyria/zig/src/consensus/mod.zig --dep zig-quic --dep core --dep encoding --dep utils --dep net_utils -Mp2p=/Users/karan/zephyria/zig/src/p2p/mod.zig --dep grpc --dep core --dep p2p --dep encoding --dep utils -Mrpc=/Users/karan/zephyria/zig/src/rpc/mod.zig --dep storage --dep encoding --dep utils -Mcore=/Users/karan/zephyria/zig/src/core/mod.zig --dep core --dep storage --dep consensus --dep p2p -Mnode=/Users/karan/zephyria/zig/src/node/mod.zig -Mutils=/Users/karan/zephyria/zig/src/utils/mod.zig -Mverkle-crypto=/Users/karan/zephyria/zig/libs/verkle-crypto/src/main.zig .zig-cache/o/03716e4678d70b6054507343873db3ef/libblst.a -ODebug -I .zig-cache/o/37bd9077cfb56e83f0ee4d8c8828a410 -I /Users/karan/zephyria/zig/libs/blst-wrapper/include -Mblst=/Users/karan/zephyria/zig/libs/blst-z/src/root.zig -ODebug --dep zig_quic -Mzig-quic=/Users/karan/zephyria/zig/libs/zig-quic/src/root.zig -Mencoding=/Users/karan/zephyria/zig/src/encoding/mod.zig -Mnet_utils=/Users/karan/zephyria/zig/src/net/mod.zig -ODebug --dep spice -Mgrpc=/Users/karan/zephyria/zig/libs/grpc-zig/src/server.zig -Mzig_quic=/Users/karan/zephyria/zig/libs/zig-quic/src/root.zig -Mspice=/Users/karan/.cache/zig/p/spice-0.0.0-3FtxfEq9AAASAwEKfAmQ4uDhc9vkuwHrRkjEeEYx1aCP/src/root.zig -lc --cache-dir .zig-cache --global-cache-dir /Users/karan/.cache/zig --name zephyria --zig-lib-dir /opt/homebrew/Cellar/zig/0.15.2/lib/zig/ --listen=-
+
+Build Summary: 2/5 steps succeeded; 1 failed
+install transitive failure
++- install zephyria transitive failure
+   +- compile exe zephyria Debug native 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache/o/f4e295fe33fb205abc71428bfa669c32/build /opt/homebrew/Cellar/zig/0.15.2/bin/zig /opt/homebrew/Cellar/zig/0.15.2/lib/zig /Users/karan/zephyria/zig .zig-cache /Users/karan/.cache/zig --seed 0x7b5dacec -Zd883234ef50b786e
