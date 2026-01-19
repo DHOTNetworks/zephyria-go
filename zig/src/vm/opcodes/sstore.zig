@@ -90,3 +90,19 @@ fn calculateSstoreGas(current: BigInt, new: BigInt) u64 {
         return 2900;
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // SSTORE: key, val -> (consumes both)
+    if (stack_top.* < 2) return error.StackUnderflow;
+    try jit.materialize_slot(stack_top.* - 1);
+    try jit.materialize_slot(stack_top.* - 2);
+
+    const key_slot = jit.get_virtual_slot(@intCast(stack_top.* - 1));
+    const val_slot = jit.get_virtual_slot(@intCast(stack_top.* - 2));
+
+    try jit.emit_native_sstore(key_slot.register, val_slot.register);
+    jit.pop_virtual(2);
+    stack_top.* -= 2;
+}

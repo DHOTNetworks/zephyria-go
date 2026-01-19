@@ -27,3 +27,12 @@ fn execute(evm: *EVM) !void {
     const result = BigInt.fromBytes(bytes);
     try evm.stack.push(evm.allocator, result);
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // COINBASE: Push block producer address (placeholder - all zeros for JIT)
+    const COINBASE: u256 = 0;
+    try jit.push_virtual_constant(COINBASE);
+    stack_top.* += 1;
+}

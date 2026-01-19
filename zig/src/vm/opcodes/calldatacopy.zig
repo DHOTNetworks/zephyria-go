@@ -46,12 +46,20 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
+    // CALLDATACOPY: destOffset, offset, length -> void
     if (stack_top.* < 3) return error.StackUnderflow;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Calldatacopy, &.{
-        .{ .symbol = "_HOLE_DST", .value = stack_top.* - 1 },
-        .{ .symbol = "_HOLE_SRC1", .value = stack_top.* - 2 },
-        .{ .symbol = "_HOLE_SRC2", .value = stack_top.* - 3 },
-    });
+    const size_idx = stack_top.* - 1;
+    const offset_idx = stack_top.* - 2;
+    const destOffset_idx = stack_top.* - 3;
+
+    try jit.materialize_slot(size_idx); // length
+    try jit.materialize_slot(offset_idx); // offset
+    try jit.materialize_slot(destOffset_idx); // destOffset
+
+    const destOffset_slot = jit.get_virtual_slot(@intCast(destOffset_idx));
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+    try jit.emit_native_calldatacopy(destOffset_slot.register, offset_slot.register, size_slot.register);
+    jit.pop_virtual(3);
     stack_top.* -= 3;
 }

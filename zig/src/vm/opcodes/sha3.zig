@@ -66,3 +66,21 @@ fn execute(evm: *EVM) !void {
     const result = BigInt.fromBytes(hash);
     try evm.stack.push(evm.allocator, result);
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const offset_idx = stack_top.* - 1;
+    const size_idx = stack_top.* - 2;
+
+    try jit.materialize_slot(@intCast(offset_idx));
+    try jit.materialize_slot(@intCast(size_idx));
+
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+
+    try jit.emit_native_sha3(size_slot.register, offset_slot.register, size_slot.register);
+    jit.pop_virtual(1);
+    stack_top.* -= 1;
+}

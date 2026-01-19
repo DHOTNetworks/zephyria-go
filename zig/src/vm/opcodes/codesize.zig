@@ -19,6 +19,12 @@ pub fn getImpl() struct { code: u8, impl: OpcodeImpl } {
 }
 
 fn execute(evm: *EVM) !void {
-    const size = BigInt.init(@as(u64, evm.code.len));
-    try evm.stack.push(evm.allocator, size);
+    try evm.stack.push(evm.allocator, BigInt.init(evm.code.len));
+}
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    // CODESIZE pushes the length of the bytecode
+    try jit.push_virtual_constant(@as(u256, bytecode.len));
+    stack_top.* += 1;
 }

@@ -32,9 +32,10 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Caller, &.{
-        .{ .symbol = "_HOLE_DST", .value = stack_top.* },
-    });
+    // CALLER: Push caller address from JitContext
+    try jit.push_virtual_memory();
     stack_top.* += 1;
+    try jit.materialize_slot(@intCast(stack_top.* - 1));
+    const slot = jit.get_virtual_slot(@intCast(stack_top.* - 1));
+    try jit.emit_native_caller(slot.register);
 }

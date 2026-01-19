@@ -22,9 +22,11 @@ fn execute(evm: *EVM) !void {
     } else return error.StackUnderflow;
 }
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
-    _ = pc; _ = bytecode;
+    _ = pc;
+    _ = bytecode;
     const n = 1;
     if (stack_top.* < n) return error.StackUnderflow;
+    try jit.push_virtual_memory();
     try jit.compile_move(stack_top.*, stack_top.* - n);
     stack_top.* += 1;
 }

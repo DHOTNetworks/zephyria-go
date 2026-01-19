@@ -160,6 +160,7 @@ pub fn build(b: *std.Build) void {
     core_mod.addImport("utils", utils_mod);
 
     vm_mod.addImport("core", core_mod);
+    vm_mod.addImport("storage", storage_mod);
     consensus_mod.addImport("core", core_mod);
 
     p2p_mod.addImport("core", core_mod);
@@ -216,6 +217,27 @@ pub fn build(b: *std.Build) void {
     const run_storage_test = b.addRunArtifact(storage_test);
     test_step.dependOn(&run_storage_test.step);
 
+    // VM Tests
+    const vm_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    vm_test.root_module.addImport("core", core_mod);
+    vm_test.root_module.addImport("storage", storage_mod);
+    vm_test.root_module.addImport("encoding", encoding_mod);
+    vm_test.root_module.addImport("utils", utils_mod);
+    vm_test.root_module.addImport("stencils", stencils_mod);
+    vm_test.linkLibC();
+
+    const run_vm_test = b.addRunArtifact(vm_test);
+    test_step.dependOn(&run_vm_test.step);
+
+    const test_parallel_jit_step = b.step("test-parallel-jit", "Run Parallel JIT deterministic tests");
+    test_parallel_jit_step.dependOn(&run_vm_test.step);
+
     // JIT Verification Test Executable
     const test_jit_exe = b.addExecutable(.{
         .name = "test_jit",
@@ -232,6 +254,189 @@ pub fn build(b: *std.Build) void {
     const run_test_jit = b.addRunArtifact(test_jit_exe);
     const test_jit_step = b.step("test-jit", "Run JIT verification test");
     test_jit_step.dependOn(&run_test_jit.step);
+
+    const benchmark_exe = b.addExecutable(.{
+        .name = "benchmark_jit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/benchmark_jit.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    benchmark_exe.root_module.addImport("vm", vm_mod);
+    benchmark_exe.linkLibC();
+
+    const run_benchmark = b.addRunArtifact(benchmark_exe);
+    const benchmark_step = b.step("benchmark", "Run JIT parallel benchmarks");
+    benchmark_step.dependOn(&run_benchmark.step);
+
+    const test_native_vm = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_native_vm.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_native_vm.root_module.addImport("vm", vm_mod);
+    test_native_vm.linkLibC();
+
+    const run_test_native_vm = b.addRunArtifact(test_native_vm);
+    const test_native_vm_step = b.step("test-native-vm", "Run Native VM verification tests");
+    test_native_vm_step.dependOn(&run_test_native_vm.step);
+
+    const test_jit_spill = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_jit_spill.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_jit_spill.root_module.addImport("vm", vm_mod);
+    test_jit_spill.root_module.addImport("core", core_mod);
+    test_jit_spill.linkLibC();
+
+    const run_test_jit_spill = b.addRunArtifact(test_jit_spill);
+    const test_jit_spill_step = b.step("test-jit-spill", "Run JIT Spilling verification tests");
+    test_jit_spill_step.dependOn(&run_test_jit_spill.step);
+
+    const test_opcodes_prod = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_opcodes_prod.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_opcodes_prod.root_module.addImport("vm", vm_mod);
+    test_opcodes_prod.root_module.addImport("core", core_mod);
+    test_opcodes_prod.linkLibC();
+
+    const run_test_opcodes_prod = b.addRunArtifact(test_opcodes_prod);
+    const test_opcodes_prod_step = b.step("test-opcodes-prod", "Run TLOAD/TSTORE/MCOPY verification tests");
+    test_opcodes_prod_step.dependOn(&run_test_opcodes_prod.step);
+
+    // Full opcode coverage tests
+    const test_full_opcodes = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_full_opcodes.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_full_opcodes.root_module.addImport("vm", vm_mod);
+    test_full_opcodes.root_module.addImport("core", core_mod);
+    test_full_opcodes.linkLibC();
+
+    const run_test_full_opcodes = b.addRunArtifact(test_full_opcodes);
+    const test_full_opcodes_step = b.step("test-full-opcodes", "Run full opcode coverage tests");
+    test_full_opcodes_step.dependOn(&run_test_full_opcodes.step);
+
+    const test_cancun = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_cancun.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_cancun.root_module.addImport("vm", vm_mod);
+    test_cancun.linkLibC();
+
+    const run_test_cancun = b.addRunArtifact(test_cancun);
+    const test_cancun_step = b.step("test-cancun", "Run Cancun verification tests");
+    test_cancun_step.dependOn(&run_test_cancun.step);
+
+    const test_calls = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_calls.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_calls.root_module.addImport("vm", vm_mod);
+    test_calls.linkLibC();
+
+    const run_test_calls = b.addRunArtifact(test_calls);
+    const test_calls_step = b.step("test-calls", "Run Nested Call verification tests");
+    test_calls_step.dependOn(&run_test_calls.step);
+
+    // Benchmark JIT
+    const benchmark_jit = b.addTest(.{
+        .name = "benchmark-jit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/benchmark_jit.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    benchmark_jit.root_module.addImport("vm", vm_mod);
+    benchmark_jit.linkLibC();
+
+    const run_benchmark_jit = b.addRunArtifact(benchmark_jit);
+    const benchmark_jit_step = b.step("benchmark-jit", "Run JIT engine benchmarks");
+    benchmark_jit_step.dependOn(&run_benchmark_jit.step);
+
+    // TPS Benchmark (isolated measurements)
+    const benchmark_tps = b.addTest(.{
+        .name = "benchmark-tps",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/benchmark_tps.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    benchmark_tps.root_module.addImport("vm", vm_mod);
+    benchmark_tps.linkLibC();
+
+    const run_benchmark_tps = b.addRunArtifact(benchmark_tps);
+    const benchmark_tps_step = b.step("benchmark-tps", "Run isolated TPS benchmarks");
+    benchmark_tps_step.dependOn(&run_benchmark_tps.step);
+
+    // Production Benchmark (Max Load)
+    const benchmark_prod = b.addTest(.{
+        .name = "benchmark-production",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/benchmark_production.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    benchmark_prod.root_module.addImport("vm", vm_mod);
+    benchmark_prod.linkLibC();
+
+    const run_benchmark_prod = b.addRunArtifact(benchmark_prod);
+    const benchmark_prod_step = b.step("benchmark-production", "Run production-grade high-load benchmarks");
+    benchmark_prod_step.dependOn(&run_benchmark_prod.step);
+
+    // Multicore Benchmark
+    const benchmark_multicore = b.addExecutable(.{
+        .name = "benchmark_multicore",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/benchmark_multicore.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    benchmark_multicore.root_module.addImport("vm", vm_mod);
+    benchmark_multicore.linkLibC();
+
+    const run_benchmark_multicore = b.addRunArtifact(benchmark_multicore);
+    const benchmark_multicore_step = b.step("benchmark-multicore", "Run multicore performance benchmark");
+    benchmark_multicore_step.dependOn(&run_benchmark_multicore.step);
+
+    // Contract Integration Test
+    const test_contract_exe = b.addExecutable(.{
+        .name = "test_contract",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/vm/tests/test_contract.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    test_contract_exe.root_module.addImport("vm", vm_mod);
+    test_contract_exe.linkLibC();
+
+    const run_test_contract = b.addRunArtifact(test_contract_exe);
+    const test_contract_step = b.step("test-contract", "Run solidity contract integration test");
+    test_contract_step.dependOn(&run_test_contract.step);
 
     // Automated Opcode Index Generation
     const opcode_dir_path = "src/vm/opcodes";

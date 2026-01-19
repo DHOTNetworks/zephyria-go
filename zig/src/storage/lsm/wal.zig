@@ -49,6 +49,12 @@ pub const WAL = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn reset(self: *WAL) !void {
+        try self.file.setEndPos(0);
+        try self.file.seekTo(0);
+        self.current_offset = 0;
+    }
+
     pub fn append(self: *WAL, data: []const u8, tx_id: u64) !void {
         // Prepare buffer (Header + Data)
         const total_len = @sizeOf(EntryHeader) + data.len;

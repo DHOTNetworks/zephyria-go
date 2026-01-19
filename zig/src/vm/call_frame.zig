@@ -49,7 +49,9 @@ pub const CallFrame = struct {
     depth: u16, // Call depth (max 1024)
 
     // Saved context for returning
-    saved_memory: ?[]u8, // Parent's memory state (optional, for rollback)
+    stack: Stack,
+    memory: Memory,
+    saved_return_data: []u8,
 
     pub fn init(
         caller: [20]u8,
@@ -64,6 +66,8 @@ pub const CallFrame = struct {
         is_delegate: bool,
         is_create: bool,
         depth: u16,
+        stack: Stack,
+        memory: Memory,
     ) CallFrame {
         return CallFrame{
             .caller = caller,
@@ -82,7 +86,9 @@ pub const CallFrame = struct {
             .is_delegate = is_delegate,
             .is_create = is_create,
             .depth = depth,
-            .saved_memory = null,
+            .stack = stack,
+            .memory = memory,
+            .saved_return_data = &[_]u8{},
         };
     }
 
@@ -132,7 +138,8 @@ pub const CallStack = struct {
     }
 
     pub fn pop(self: *CallStack) ?CallFrame {
-        return self.frames.popOrNull();
+        if (self.frames.items.len == 0) return null;
+        return self.frames.pop();
     }
 
     pub fn current(self: *CallStack) ?*CallFrame {
@@ -218,11 +225,17 @@ test "CallFrame basic" {
         false,
         false,
         0,
+        Stack.init(std.testing.allocator),
+        Memory.init(std.testing.allocator),
     );
 
     try frame.consumeGas(1000);
     try std.testing.expectEqual(@as(u64, 99000), frame.remainingGas());
     try std.testing.expectEqual(@as(u64, 1000), frame.gas_used);
+
+    // Clean up resources for test
+    frame.stack.deinit(std.testing.allocator);
+    frame.memory.deinit(std.testing.allocator);
 }
 
 test "CallStack depth" {
@@ -243,6 +256,8 @@ test "CallStack depth" {
         false,
         false,
         0,
+        Stack.init(allocator),
+        Memory.init(allocator),
     );
 
     try stack.push(frame);
@@ -271,6 +286,8 @@ test "static context propagation" {
         false,
         false,
         0,
+        Stack.init(allocator),
+        Memory.init(allocator),
     );
     try stack.push(static_frame);
 
@@ -288,6 +305,8 @@ test "static context propagation" {
         false,
         false,
         1,
+        Stack.init(allocator),
+        Memory.init(allocator),
     );
     try stack.push(nested_frame);
 

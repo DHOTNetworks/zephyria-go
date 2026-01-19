@@ -11,8 +11,8 @@ pub fn main() !void {
     std.debug.print("\n=== Zephyria JIT Verification Suite ===\n", .{});
 
     try testArithmeticLoop(allocator);
-    // Memory ops temporarily disabled pending stencil investigation
-    // try testMemoryOps(allocator);
+    // Memory ops enabled
+    try testMemoryOps(allocator);
     try testCalldataOps(allocator);
     try testResourceIntensive(allocator);
 
@@ -41,7 +41,7 @@ fn testArithmeticLoop(allocator: std.mem.Allocator) !void {
         0x60, 0x01, // PUSH1 1
         0x03, // SUB      -> [count - 1]
         0x80, // DUP1     -> [count-1, count-1]
-        0x60, 0x02, // PUSH1 2
+        0x60, 0x02, // PUSH1 2 (target PC=2)
         0x57, // JUMPI
     };
 
@@ -55,10 +55,53 @@ fn testArithmeticLoop(allocator: std.mem.Allocator) !void {
         .memory_len = 0,
         .calldata_ptr = undefined,
         .calldata_len = 0,
+        .returndata_ptr = undefined,
+        .returndata_len = 0,
         .address = [_]u8{0} ** 20,
+        ._pad1 = [_]u8{0} ** 4,
         .caller = [_]u8{0} ** 20,
+        ._pad2 = [_]u8{0} ** 4,
         .origin = [_]u8{0} ** 20,
+        ._pad3 = [_]u8{0} ** 4,
         .call_value = [_]u8{0} ** 32,
+        .chain_id = 0,
+        .block_number = 0,
+        .timestamp = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .base_fee = 0,
+        .prevrandao = [_]u8{0} ** 32,
+        .coinbase = [_]u8{0} ** 20,
+        ._pad4 = [_]u8{0} ** 4,
+        .gas_remaining = 0,
+        .bytecode_ptr = undefined,
+        .bytecode_len = 0,
+        .db = undefined,
+        .evm_sload = undefined,
+        .evm_sstore = undefined,
+        .evm_sha3 = undefined,
+        .evm_balance = undefined,
+        .evm_blockhash = undefined,
+        .evm_extcodesize = undefined,
+        .evm_extcodehash = undefined,
+        .evm_extcodecopy = undefined,
+        .evm_log = undefined,
+        .evm_call = undefined,
+        .evm_callcode = undefined,
+        .evm_delegatecall = undefined,
+        .evm_staticcall = undefined,
+        .evm_create = undefined,
+        .evm_create2 = undefined,
+        .evm_tload = undefined,
+        .evm_tstore = undefined,
+        .evm_mcopy = undefined,
+        .evm_extend_memory = undefined,
+        .is_static = false,
+        .is_halt = false,
+        .is_revert = false,
+        ._pad_flags = [_]u8{0} ** 5,
+        .evm_ptr = undefined,
+        ._pad_final = [_]u8{0} ** 8,
     };
 
     const func_ptr = jit_comp.getFunction();
@@ -91,31 +134,76 @@ fn testMemoryOps(allocator: std.mem.Allocator) !void {
     defer allocator.free(stack);
     @memset(stack, 0);
 
-    const memory = try allocator.alloc(u8, 128);
-    defer allocator.free(memory);
-    @memset(memory, 0);
+    // Use VM Memory (Soft-MMU)
+    var memory = try vm.Memory.init(allocator);
+    defer memory.deinit(allocator);
+    try memory.ensureCapacity(allocator, 128);
 
     var ctx = JitContext{
         .stack_base = @ptrCast(stack.ptr),
-        .memory_ptr = @ptrCast(memory.ptr),
-        .memory_len = memory.len,
+        .memory_ptr = memory.raw_ptr,
+        .memory_len = memory.committed_len,
         .calldata_ptr = undefined,
         .calldata_len = 0,
+        .returndata_ptr = undefined,
+        .returndata_len = 0,
         .address = [_]u8{0} ** 20,
+        ._pad1 = [_]u8{0} ** 4,
         .caller = [_]u8{0} ** 20,
+        ._pad2 = [_]u8{0} ** 4,
         .origin = [_]u8{0} ** 20,
+        ._pad3 = [_]u8{0} ** 4,
         .call_value = [_]u8{0} ** 32,
+        .chain_id = 0,
+        .block_number = 0,
+        .timestamp = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .base_fee = 0,
+        .prevrandao = [_]u8{0} ** 32,
+        .coinbase = [_]u8{0} ** 20,
+        ._pad4 = [_]u8{0} ** 4,
+        .gas_remaining = 0,
+        .bytecode_ptr = undefined,
+        .bytecode_len = 0,
+        .db = undefined,
+        .evm_sload = undefined,
+        .evm_sstore = undefined,
+        .evm_sha3 = undefined,
+        .evm_balance = undefined,
+        .evm_blockhash = undefined,
+        .evm_extcodesize = undefined,
+        .evm_extcodehash = undefined,
+        .evm_extcodecopy = undefined,
+        .evm_log = undefined,
+        .evm_call = undefined,
+        .evm_callcode = undefined,
+        .evm_delegatecall = undefined,
+        .evm_staticcall = undefined,
+        .evm_create = undefined,
+        .evm_create2 = undefined,
+        .evm_tload = undefined,
+        .evm_tstore = undefined,
+        .evm_mcopy = undefined,
+        .evm_extend_memory = undefined,
+        .is_static = false,
+        .is_halt = false,
+        .is_revert = false,
+        ._pad_flags = [_]u8{0} ** 5,
+        .evm_ptr = undefined,
+        ._pad_final = [_]u8{0} ** 8,
     };
 
     const func_ptr = jit_comp.getFunction();
     const func: *const fn ([*]u256, *const JitContext) callconv(.c) void = @ptrCast(@alignCast(func_ptr));
     func(@ptrCast(stack.ptr), &ctx);
 
+    const mem_slice = memory.getData();
     std.debug.print("Memory[0..32]: ", .{});
-    for (memory[0..32]) |b| std.debug.print("{x:0>2} ", .{b});
+    for (mem_slice[0..32]) |b| std.debug.print("{x:0>2} ", .{b});
     std.debug.print("\n", .{});
 
-    for (memory[0..32]) |b| try std.testing.expectEqual(@as(u8, 0xFF), b);
+    for (mem_slice[0..32]) |b| try std.testing.expectEqual(@as(u8, 0xFF), b);
     try std.testing.expectEqual(@as(u256, ~@as(u256, 0)), stack[0]);
     std.debug.print("[PASS]\n", .{});
 }
@@ -143,10 +231,53 @@ fn testCalldataOps(allocator: std.mem.Allocator) !void {
         .memory_len = 0,
         .calldata_ptr = @ptrCast(&calldata),
         .calldata_len = calldata.len,
+        .returndata_ptr = undefined,
+        .returndata_len = 0,
         .address = [_]u8{0} ** 20,
+        ._pad1 = [_]u8{0} ** 4,
         .caller = [_]u8{0} ** 20,
+        ._pad2 = [_]u8{0} ** 4,
         .origin = [_]u8{0} ** 20,
+        ._pad3 = [_]u8{0} ** 4,
         .call_value = [_]u8{0} ** 32,
+        .chain_id = 0,
+        .block_number = 0,
+        .timestamp = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .base_fee = 0,
+        .prevrandao = [_]u8{0} ** 32,
+        .coinbase = [_]u8{0} ** 20,
+        ._pad4 = [_]u8{0} ** 4,
+        .gas_remaining = 0,
+        .bytecode_ptr = undefined,
+        .bytecode_len = 0,
+        .db = undefined,
+        .evm_sload = undefined,
+        .evm_sstore = undefined,
+        .evm_sha3 = undefined,
+        .evm_balance = undefined,
+        .evm_blockhash = undefined,
+        .evm_extcodesize = undefined,
+        .evm_extcodehash = undefined,
+        .evm_extcodecopy = undefined,
+        .evm_log = undefined,
+        .evm_call = undefined,
+        .evm_callcode = undefined,
+        .evm_delegatecall = undefined,
+        .evm_staticcall = undefined,
+        .evm_create = undefined,
+        .evm_create2 = undefined,
+        .evm_tload = undefined,
+        .evm_tstore = undefined,
+        .evm_mcopy = undefined,
+        .evm_extend_memory = undefined,
+        .is_static = false,
+        .is_halt = false,
+        .is_revert = false,
+        ._pad_flags = [_]u8{0} ** 5,
+        .evm_ptr = undefined,
+        ._pad_final = [_]u8{0} ** 8,
     };
 
     const func_ptr = jit_comp.getFunction();
@@ -195,10 +326,53 @@ fn testResourceIntensive(allocator: std.mem.Allocator) !void {
         .memory_len = 0,
         .calldata_ptr = undefined,
         .calldata_len = 0,
+        .returndata_ptr = undefined,
+        .returndata_len = 0,
         .address = [_]u8{0} ** 20,
+        ._pad1 = [_]u8{0} ** 4,
         .caller = [_]u8{0} ** 20,
+        ._pad2 = [_]u8{0} ** 4,
         .origin = [_]u8{0} ** 20,
+        ._pad3 = [_]u8{0} ** 4,
         .call_value = [_]u8{0} ** 32,
+        .chain_id = 0,
+        .block_number = 0,
+        .timestamp = 0,
+        .gas_limit = 0,
+        .gas_price = 0,
+        .base_fee = 0,
+        .prevrandao = [_]u8{0} ** 32,
+        .coinbase = [_]u8{0} ** 20,
+        ._pad4 = [_]u8{0} ** 4,
+        .gas_remaining = 0,
+        .bytecode_ptr = undefined,
+        .bytecode_len = 0,
+        .db = undefined,
+        .evm_sload = undefined,
+        .evm_sstore = undefined,
+        .evm_sha3 = undefined,
+        .evm_balance = undefined,
+        .evm_blockhash = undefined,
+        .evm_extcodesize = undefined,
+        .evm_extcodehash = undefined,
+        .evm_extcodecopy = undefined,
+        .evm_log = undefined,
+        .evm_call = undefined,
+        .evm_callcode = undefined,
+        .evm_delegatecall = undefined,
+        .evm_staticcall = undefined,
+        .evm_create = undefined,
+        .evm_create2 = undefined,
+        .evm_tload = undefined,
+        .evm_tstore = undefined,
+        .evm_mcopy = undefined,
+        .evm_extend_memory = undefined,
+        .is_static = false,
+        .is_halt = false,
+        .is_revert = false,
+        ._pad_flags = [_]u8{0} ** 5,
+        .evm_ptr = undefined,
+        ._pad_final = [_]u8{0} ** 8,
     };
 
     const func_ptr = jit_comp.getFunction();

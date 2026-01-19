@@ -38,20 +38,39 @@ fn execute(evm: *EVM) !void {
     }
     const offset: usize = @intCast(offset_big.data[0]);
 
-    // Allocate return data buffer (revert reason)
+    // Allocate return data buffer
+    var return_buffer: []u8 = &[_]u8{};
     if (size > 0) {
-        var return_buffer = try evm.allocator.alloc(u8, size);
-
-        // Copy from memory to return buffer
+        return_buffer = try evm.allocator.alloc(u8, size);
         for (0..size) |i| {
             return_buffer[i] = evm.memory.loadByte(offset + i);
         }
+    }
+    // Ownership transferred to exitCall/EVM
 
-        // Store as return data
-        evm.return_data = return_buffer;
+    // Exit call with failure (revert)
+    try evm.exitCall(.{ .success = false, .data = return_buffer });
+}
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const size_idx = stack_top.* - 1;
+    const offset_idx = stack_top.* - 2;
+
+    try jit.materialize_slot(@intCast(size_idx));
+    try jit.materialize_slot(@intCast(offset_idx));
+
+    const s_slot = jit.get_virtual_slot(@intCast(size_idx));
+    const o_slot = jit.get_virtual_slot(@intCast(offset_idx));
+
+    if (s_slot != .register or o_slot != .register) {
+        return error.JitRegisterAllocationFailed;
     }
 
-    // Stop execution and mark as reverted
-    evm.stop_execution = true;
-    evm.execution_reverted = true;
+    try jit.emit_native_revert(o_slot.register, s_slot.register);
+
+    jit.pop_virtual(2);
+    stack_top.* -= 2;
 }

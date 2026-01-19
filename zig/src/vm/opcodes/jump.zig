@@ -28,8 +28,18 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 1) return error.StackUnderflow;
-    // const target = stack_top.* - 1; // Needs dynamic logic
-    // For now, dummy
-    try jit.compile_jump(0);
-    stack_top.* -= 1;
+    // Check for Static Jump (Constant)
+    const dest_idx = stack_top.* - 1;
+    const dest_slot = jit.get_virtual_slot(dest_idx);
+
+    if (dest_slot == .constant) {
+        const target = @as(usize, @intCast(dest_slot.constant));
+        try jit.compile_jump(target);
+        // Note: JUMP consumes stack item (destination).
+        // We pop 1.
+        jit.pop_virtual(1);
+        stack_top.* -= 1;
+    } else {
+        return error.DynamicJumpNotSupported;
+    }
 }

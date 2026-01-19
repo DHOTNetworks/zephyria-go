@@ -32,9 +32,12 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Address, &.{
-        .{ .symbol = "_HOLE_DST", .value = stack_top.* },
-    });
+    // ADDRESS: Push contract address from JitContext
+    // Use constant for now - the address is set at JIT time
+    // Read address from context at offset 56 (20 bytes)
+    try jit.push_virtual_memory();
     stack_top.* += 1;
+    try jit.materialize_slot(@intCast(stack_top.* - 1));
+    const slot = jit.get_virtual_slot(@intCast(stack_top.* - 1));
+    try jit.emit_native_address(slot.register);
 }

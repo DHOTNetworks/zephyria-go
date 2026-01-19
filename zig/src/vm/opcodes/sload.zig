@@ -32,3 +32,14 @@ fn execute(evm: *EVM) !void {
         try evm.stack.push(evm.allocator, BigInt.zero());
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // SLOAD: key -> value
+    if (stack_top.* < 1) return error.StackUnderflow;
+    try jit.materialize_slot(stack_top.* - 1);
+
+    const key_slot = jit.get_virtual_slot(@intCast(stack_top.* - 1));
+    try jit.emit_native_sload(key_slot.register, key_slot.register);
+}

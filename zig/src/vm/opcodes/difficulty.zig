@@ -19,3 +19,11 @@ fn execute(evm: *EVM) !void {
     // Push the block difficulty onto the stack
     try evm.stack.push(evm.allocator, evm.block_difficulty);
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // DIFFICULTY (PREVRANDAO post-merge) - placeholder random value
+    const PREVRANDAO: u256 = 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef;
+    try jit.push_virtual_constant(PREVRANDAO);
+    stack_top.* += 1;
+}

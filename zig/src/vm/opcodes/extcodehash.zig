@@ -54,3 +54,16 @@ fn execute(evm: *EVM) !void {
         try evm.stack.push(evm.allocator, BigInt.zero());
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 1) return error.StackUnderflow;
+    const addr_idx = stack_top.* - 1;
+    try jit.materialize_slot(addr_idx);
+    const slot = jit.get_virtual_slot(@intCast(addr_idx));
+
+    // Result reuses slot
+    try jit.emit_native_extcodehash(slot.register, slot.register);
+    // Stack depth unchanged
+}

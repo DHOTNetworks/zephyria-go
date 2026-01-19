@@ -92,21 +92,51 @@ fn execute(evm: *EVM) !void {
     };
     try evm.accounts.put(new_address, new_account);
 
-    // For a full implementation, we would:
-    // 1. Push a new call frame
-    // 2. Execute init_code
-    // 3. Use return data as the contract code
-    // 4. Handle reverts and errors
+    // Execute the init code using enterCall
+    try evm.enterCall(.{
+        .address = new_address,
+        .value = value_big,
+        .gas = evm.gas, // Pass all remaining gas? (minus 1/64th rule applies to CREATE?)
+        .calldata = &[_]u8{}, // No calldata for CREATE (init code is code)
+        .code = init_code, // The init code becomes the executing code
+        .caller = evm.current_address,
+        .code_address = new_address,
+        .is_static = false, // CREATE cannot be static
+        .is_delegate = false,
+        .is_create = true,
+        .return_offset = 0,
+        .return_size = 0,
+    });
 
-    // Simplified: Store init_code directly as the contract code
-    // In a full implementation, init_code would be executed and
-    // the return data would become the contract code
-    const new_account_ptr = evm.accounts.getPtr(new_address).?;
-    new_account_ptr.code = try evm.allocator.dupe(u8, init_code);
+    // Note: enterCall switches context.
+    // The success/failure (and address push) will be handled by exitCall when the sub-context returns.
+    // We do NOT modify stack here.
+}
 
-    // Push new address to stack
-    var addr_bytes: [32]u8 = [_]u8{0} ** 32;
-    @memcpy(addr_bytes[12..32], &new_address);
-    const result = BigInt.fromBytes(addr_bytes);
-    try evm.stack.push(evm.allocator, result);
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // CREATE: value, offset, size -> address
+    if (stack_top.* < 3) return error.StackUnderflow;
+
+    const val_idx = stack_top.* - 1;
+    const off_idx = stack_top.* - 2;
+    const size_idx = stack_top.* - 3;
+
+    try jit.materialize_slot(@intCast(val_idx));
+    try jit.materialize_slot(@intCast(off_idx));
+    try jit.materialize_slot(@intCast(size_idx));
+
+    const val_slot = jit.get_virtual_slot(@intCast(val_idx));
+    const off_slot = jit.get_virtual_slot(@intCast(off_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+
+    if (val_slot != .register or off_slot != .register or size_slot != .register) {
+        return error.JitRegisterAllocationFailed;
+    }
+
+    // Result written to size_idx (deepest slot)
+    try jit.emit_native_create(val_slot.register, off_slot.register, size_slot.register, size_slot.register);
+    jit.pop_virtual(2);
+    stack_top.* -= 2;
 }

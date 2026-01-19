@@ -29,6 +29,7 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     const value = bytecode[pc.*];
     pc.* += 1;
 
+    try jit.push_virtual_constant(@as(u256, value));
     try jit.compile_push(stack_top.*, @as(u256, value));
     stack_top.* += 1;
 }

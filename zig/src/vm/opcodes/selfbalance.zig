@@ -24,3 +24,14 @@ fn execute(evm: *EVM) !void {
         try evm.stack.push(evm.allocator, BigInt.init(0));
     }
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // SELFBALANCE: Read balance of current address from context
+    // SELFBALANCE: Push balance of current contract
+    try jit.push_virtual_memory();
+    stack_top.* += 1;
+    try jit.materialize_slot(@intCast(stack_top.* - 1));
+    const slot = jit.get_virtual_slot(@intCast(stack_top.* - 1));
+    try jit.emit_native_selfbalance(slot.register);
+}

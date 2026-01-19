@@ -146,18 +146,73 @@ fn execute(evm: *EVM) !void {
         call_gas += CALL_STIPEND;
     }
 
-    // For a full implementation, we would execute the target code here
-    // with a new call frame. For now, we simulate success.
+    // Execute the call using enterCall
+    try evm.enterCall(.{
+        .address = target_addr,
+        .value = value_big,
+        .gas = call_gas,
+        .calldata = calldata,
+        .code = target_code,
+        .caller = evm.current_address,
+        .code_address = target_addr,
+        .is_static = evm.call_stack.isStatic(), // Inherit static
+        .is_delegate = false,
+        .is_create = false,
+        .return_offset = ret_offset,
+        .return_size = ret_size,
+    });
 
-    // Ensure return memory is available
-    try evm.memory.ensureCapacity(evm.allocator, ret_offset + ret_size);
+    // Note: enterCall switches context.
+    // The success/failure result will be pushed by exitCall when the sub-context returns.
+    // We do NOT modify stack here (pc is handled by enterCall/exitCall logic).
+}
 
-    // In a full implementation, return data would come from sub-execution
-    if (evm.return_data.len > 0) {
-        evm.allocator.free(evm.return_data);
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // CALL: gas, addr, value, argsOffset, argsSize, retOffset, retSize -> success
+    if (stack_top.* < 7) return error.StackUnderflow;
+
+    // Materialize all 7 arguments
+    const gas_idx = stack_top.* - 1;
+    const addr_idx = stack_top.* - 2;
+    const val_idx = stack_top.* - 3;
+    const af_idx = stack_top.* - 4;
+    const al_idx = stack_top.* - 5;
+    const rf_idx = stack_top.* - 6;
+    const rl_idx = stack_top.* - 7;
+
+    try jit.materialize_slot(gas_idx);
+    try jit.materialize_slot(addr_idx);
+    try jit.materialize_slot(val_idx);
+    try jit.materialize_slot(af_idx);
+    try jit.materialize_slot(al_idx);
+    try jit.materialize_slot(rf_idx);
+    try jit.materialize_slot(rl_idx);
+
+    const gas_slot = jit.get_virtual_slot(gas_idx);
+    const addr_slot = jit.get_virtual_slot(addr_idx);
+    const val_slot = jit.get_virtual_slot(val_idx);
+    const af_slot = jit.get_virtual_slot(af_idx);
+    const al_slot = jit.get_virtual_slot(al_idx);
+    const rf_slot = jit.get_virtual_slot(rf_idx);
+    const rl_slot = jit.get_virtual_slot(rl_idx);
+
+    // We need to write the result (success) to the stack.
+    // CALL pops 7, pushes 1.
+    // The new top will be at (top-7) + 1 = top-6.
+    // We can reuse rl_idx (the deepest slot popped) as the destination slot.
+    // Wait, rl_idx IS the result slot if we conceptually pop 7 and push 1 at rl_idx.
+    // Correct.
+
+    // Check if slots are registers
+    if (gas_slot != .register or addr_slot != .register or val_slot != .register or af_slot != .register or al_slot != .register or rf_slot != .register or rl_slot != .register) {
+        return error.JitRegisterAllocationFailed;
     }
-    evm.return_data = &[_]u8{};
 
-    // Push success (1)
-    try evm.stack.push(evm.allocator, BigInt.init(1));
+    try jit.emit_native_call(gas_slot.register, addr_slot.register, val_slot.register, af_slot.register, al_slot.register, rf_slot.register, rl_slot.register, rl_slot.register // dst = last input slot
+    );
+
+    jit.pop_virtual(6);
+    stack_top.* -= 6;
 }

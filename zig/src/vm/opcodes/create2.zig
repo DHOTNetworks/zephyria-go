@@ -122,3 +122,49 @@ fn execute(evm: *EVM) !void {
     const result = BigInt.fromBytes(addr_bytes);
     try evm.stack.push(evm.allocator, result);
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // CREATE2: value, offset, size, salt -> address
+    if (stack_top.* < 4) return error.StackUnderflow;
+
+    const val_sidx = stack_top.* - 4;
+    const off_sidx = stack_top.* - 3;
+    const size_sidx = stack_top.* - 2;
+    const salt_sidx = stack_top.* - 1;
+
+    try jit.materialize_slot(@intCast(val_sidx));
+    try jit.materialize_slot(@intCast(off_sidx));
+    try jit.materialize_slot(@intCast(size_sidx));
+    try jit.materialize_slot(@intCast(salt_sidx));
+
+    const val_slot = jit.get_virtual_slot(@intCast(val_sidx));
+    const off_slot = jit.get_virtual_slot(@intCast(off_sidx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_sidx));
+    const salt_slot = jit.get_virtual_slot(@intCast(salt_sidx));
+
+    const val_reg = switch (val_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+    const off_reg = switch (off_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+    const size_reg = switch (size_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+    const salt_reg = switch (salt_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+
+    // Result written to val_reg (reuse slot of popped Value)
+    try jit.emit_native_create2(val_reg, off_reg, size_reg, salt_reg, val_reg);
+
+    // Pop top 3 (Salt, Size, Offset), keeping Value slot (now Address)
+    jit.pop_virtual(3);
+    stack_top.* -= 3;
+}

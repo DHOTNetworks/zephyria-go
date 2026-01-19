@@ -36,3 +36,20 @@ fn execute(evm: *EVM) !void {
         } else return error.StackUnderflow;
     } else return error.StackUnderflow;
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const a_idx = stack_top.* - 1;
+    const b_idx = stack_top.* - 2;
+
+    try jit.materialize_slot(@intCast(a_idx));
+    try jit.materialize_slot(@intCast(b_idx));
+
+    const a_slot = jit.get_virtual_slot(@intCast(a_idx));
+    const b_slot = jit.get_virtual_slot(@intCast(b_idx));
+
+    try jit.emit_native_smod(b_slot.register, a_slot.register, b_slot.register);
+    jit.pop_virtual(1);
+    stack_top.* -= 1;
+}

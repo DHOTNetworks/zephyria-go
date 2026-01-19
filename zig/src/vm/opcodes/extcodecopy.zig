@@ -58,3 +58,27 @@ fn execute(evm: *EVM) !void {
         try evm.memory.storeByte(evm.allocator, dest_offset + i, byte);
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 4) return error.StackUnderflow;
+    const addr_idx = stack_top.* - 1;
+    const dest_idx = stack_top.* - 2;
+    const offset_idx = stack_top.* - 3;
+    const size_idx = stack_top.* - 4;
+
+    try jit.materialize_slot(@intCast(addr_idx));
+    try jit.materialize_slot(@intCast(dest_idx));
+    try jit.materialize_slot(@intCast(offset_idx));
+    try jit.materialize_slot(@intCast(size_idx));
+
+    const addr_slot = jit.get_virtual_slot(@intCast(addr_idx));
+    const dest_slot = jit.get_virtual_slot(@intCast(dest_idx));
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+
+    try jit.emit_native_extcodecopy(addr_slot.register, dest_slot.register, offset_slot.register, size_slot.register);
+    jit.pop_virtual(4);
+    stack_top.* -= 4;
+}

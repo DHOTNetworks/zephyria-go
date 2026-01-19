@@ -23,9 +23,9 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Calldatasize, &.{
-        .{ .symbol = "_HOLE_DST", .value = stack_top.* },
-    });
+    try jit.push_virtual_memory();
     stack_top.* += 1;
+    try jit.emit_stencil("Calldatasize", &.{
+        .{ .symbol = "_HOLE_DST", .value = stack_top.* - 1 },
+    });
 }

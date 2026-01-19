@@ -39,10 +39,12 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
-    if (stack_top.* < 1) return error.StackUnderflow;
-    const s1 = stack_top.* - 1;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Calldataload, &.{
-        .{ .symbol = "_HOLE_DST", .value = s1 },
+    const offset_idx = stack_top.* - 1;
+    try jit.emit_stencil("Calldataload", &.{
+        .{ .symbol = "_HOLE_DST", .value = offset_idx },
     });
+
+    // CALLDATALOAD: pops offset, pushes 32 bytes data. Length unchanged.
+    jit.pop_virtual(1);
+    try jit.push_virtual_memory();
 }

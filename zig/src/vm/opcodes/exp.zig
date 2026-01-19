@@ -57,3 +57,45 @@ fn execute(evm: *EVM) !void {
         } else return error.StackUnderflow;
     } else return error.StackUnderflow;
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const base_idx = stack_top.* - 1;
+    const exp_idx = stack_top.* - 2;
+
+    const v_base = jit.get_virtual_slot(@intCast(base_idx));
+    const v_exp = jit.get_virtual_slot(@intCast(exp_idx));
+
+    // Constant folding
+    if (v_base == .constant and v_exp == .constant) {
+        var base = v_base.constant;
+        var exponent = v_exp.constant;
+        var result: u256 = 1;
+
+        // Fast exponentiation using squaring
+        while (exponent > 0) {
+            if (exponent & 1 == 1) {
+                result *%= base;
+            }
+            base *%= base;
+            exponent >>= 1;
+        }
+
+        jit.pop_virtual(2);
+        try jit.push_virtual_constant(result);
+        stack_top.* -= 1;
+        return;
+    }
+
+    // Dynamic case: emit native code
+    try jit.materialize_slot(@intCast(base_idx));
+    try jit.materialize_slot(@intCast(exp_idx));
+
+    const base_slot = jit.get_virtual_slot(@intCast(base_idx));
+    const exp_slot = jit.get_virtual_slot(@intCast(exp_idx));
+
+    try jit.emit_native_exp(exp_slot.register, base_slot.register, exp_slot.register);
+    jit.pop_virtual(1);
+    stack_top.* -= 1;
+}

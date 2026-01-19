@@ -60,3 +60,29 @@ fn execute(evm: *EVM) !void {
 
     try evm.logs.append(evm.allocator, log);
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 6) return error.StackUnderflow;
+    const offset_idx = stack_top.* - 1;
+    const size_idx = stack_top.* - 2;
+
+    try jit.materialize_slot(@intCast(offset_idx));
+    try jit.materialize_slot(@intCast(size_idx));
+    try jit.materialize_slot(@intCast(stack_top.* - 3));
+    try jit.materialize_slot(@intCast(stack_top.* - 4));
+    try jit.materialize_slot(@intCast(stack_top.* - 5));
+    try jit.materialize_slot(@intCast(stack_top.* - 6));
+
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+    const t0_slot = jit.get_virtual_slot(@intCast(stack_top.* - 3));
+    const t1_slot = jit.get_virtual_slot(@intCast(stack_top.* - 4));
+    const t2_slot = jit.get_virtual_slot(@intCast(stack_top.* - 5));
+    const t3_slot = jit.get_virtual_slot(@intCast(stack_top.* - 6));
+
+    try jit.emit_native_log4(offset_slot.register, size_slot.register, t0_slot.register, t1_slot.register, t2_slot.register, t3_slot.register);
+    jit.pop_virtual(6);
+    stack_top.* -= 6;
+}

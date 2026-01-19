@@ -1,7 +1,7 @@
 // Enhanced BigInt implementation for 256-bit integers
 // Supports full 256-bit arithmetic including division, modulo, and signed operations
 pub const BigInt = struct {
-    data: [4]u64, // Little-endian: data[0] is least significant
+    data: [4]u64 align(16), // Little-endian: data[0] is least significant
 
     // ============================================================
     // Constructors and Initialization

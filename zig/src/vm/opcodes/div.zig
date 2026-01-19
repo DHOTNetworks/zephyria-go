@@ -15,8 +15,9 @@ pub fn getImpl() struct { code: u8, impl: OpcodeImpl } {
 }
 
 fn execute(evm: *EVM) !void {
-    if (evm.stack.pop()) |b| {
-        if (evm.stack.pop()) |a| {
+    // EVM: DIV pops a (TOS), then b, pushes a / b (0 if b=0)
+    if (evm.stack.pop()) |a| {
+        if (evm.stack.pop()) |b| {
             try evm.stack.push(evm.allocator, a.div(b));
         } else return error.StackUnderflow;
     } else return error.StackUnderflow;
@@ -26,13 +27,30 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 2) return error.StackUnderflow;
-    const s1 = stack_top.* - 1;
-    const s2 = stack_top.* - 2;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Div, &.{
-        .{ .symbol = "_HOLE_DST", .value = s2 },
-        .{ .symbol = "_HOLE_SRC1", .value = s2 },
-        .{ .symbol = "_HOLE_SRC2", .value = s1 },
-    });
+    const s1_idx = stack_top.* - 1; // b (divisor)
+    const s2_idx = stack_top.* - 2; // a (dividend)
+
+    const v1 = jit.get_virtual_slot(s1_idx);
+    const v2 = jit.get_virtual_slot(s2_idx);
+
+    // 1. Constant Folding: a / b (EVM returns 0 for div by 0)
+    if (v1 == .constant and v2 == .constant) {
+        const res = if (v1.constant == 0) 0 else v2.constant / v1.constant;
+        jit.pop_virtual(2);
+        try jit.push_virtual_constant(res);
+        stack_top.* -= 1;
+        return;
+    }
+
+    // 2. Native Emission
+    try jit.materialize_slot(s1_idx);
+    try jit.materialize_slot(s2_idx);
+    const r1 = jit.get_virtual_slot(s1_idx).register;
+    const r2 = jit.get_virtual_slot(s2_idx).register;
+
+    try jit.emit_native_div(r2, r2, r1);
+
+    jit.pop_virtual(2);
+    try jit.push_virtual_register(r2);
     stack_top.* -= 1;
 }

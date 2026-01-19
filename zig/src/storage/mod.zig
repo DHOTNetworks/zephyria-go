@@ -24,6 +24,16 @@ pub const verkle = struct {
     pub const trie = @import("verkle/trie.zig");
 };
 
+pub const state = @import("state.zig");
+
+test {
+    // Include sub-module tests
+    _ = @import("lsm/test_memtable_leaks.zig");
+    _ = @import("lsm/tests/test_flush.zig");
+    _ = @import("lsm/tests/test_sstable_features.zig");
+    _ = verkle.trie;
+}
+
 // Original Generic Storage Stub (to be deprecated/wrapped)
 const std = @import("std");
 pub const Storage = struct {
@@ -41,6 +51,4 @@ pub const Storage = struct {
         self.map.deinit();
         self.allocator.destroy(self);
     }
-
-    // ... Stub methods kept for compatibility ...
 };

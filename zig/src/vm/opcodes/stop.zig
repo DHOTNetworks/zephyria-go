@@ -19,3 +19,11 @@ fn execute(ev: *EVM) !void {
     // The execution loop in EVM.execute() will break when it encounters STOP
     _ = ev; // Suppress unused parameter warning
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = jit;
+    _ = pc;
+    _ = stack_top;
+    _ = bytecode;
+    // STOP is a no-op in JIT, the epilogue will be emitted at the end of compilation
+}

@@ -95,3 +95,36 @@ fn execute(evm: *EVM) !void {
 
     try evm.stack.push(evm.allocator, BigInt.init(1));
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    // STATICCALL: gas, addr, argsOffset, argsSize, retOffset, retSize -> success
+    if (stack_top.* < 6) return error.StackUnderflow;
+
+    const gas_idx = stack_top.* - 1;
+    const addr_idx = stack_top.* - 2;
+    const af_idx = stack_top.* - 3;
+    const al_idx = stack_top.* - 4;
+    const rf_idx = stack_top.* - 5;
+    const rl_idx = stack_top.* - 6;
+
+    try jit.materialize_slot(gas_idx);
+    try jit.materialize_slot(addr_idx);
+    try jit.materialize_slot(af_idx);
+    try jit.materialize_slot(al_idx);
+    try jit.materialize_slot(rf_idx);
+    try jit.materialize_slot(rl_idx);
+
+    const gas_slot = jit.get_virtual_slot(@intCast(gas_idx));
+    const addr_slot = jit.get_virtual_slot(@intCast(addr_idx));
+    const af_slot = jit.get_virtual_slot(@intCast(af_idx));
+    const al_slot = jit.get_virtual_slot(@intCast(al_idx));
+    const rf_slot = jit.get_virtual_slot(@intCast(rf_idx));
+    const rl_slot = jit.get_virtual_slot(@intCast(rl_idx));
+
+    try jit.emit_native_staticcall(gas_slot.register, addr_slot.register, af_slot.register, al_slot.register, rf_slot.register, rl_slot.register, rl_slot.register);
+
+    jit.pop_virtual(5);
+    stack_top.* -= 5;
+}

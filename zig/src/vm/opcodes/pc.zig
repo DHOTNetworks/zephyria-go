@@ -21,3 +21,11 @@ fn execute(evm: *EVM) !void {
     const current_pc = evm.pc - 1; // Subtract 1 because PC was already incremented
     try evm.stack.push(evm.allocator, BigInt.init(@as(u64, @intCast(current_pc))));
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = bytecode;
+    // PC pushes the program counter of the current instruction (before incrementing)
+    // pc has already been incremented by 1 in the main loop, so we subtract 1
+    const current_pc = pc.* - 1;
+    try jit.push_virtual_constant(@as(u256, current_pc));
+    stack_top.* += 1;
+}

@@ -60,6 +60,7 @@ pub const log2 = @import("log2.zig");
 pub const log3 = @import("log3.zig");
 pub const log4 = @import("log4.zig");
 pub const lt = @import("lt.zig");
+pub const mcopy = @import("mcopy.zig");
 pub const mload = @import("mload.zig");
 pub const mod = @import("mod.zig");
 pub const msize = @import("msize.zig");
@@ -73,6 +74,7 @@ pub const @"or" = @import("or.zig");
 pub const origin = @import("origin.zig");
 pub const pc = @import("pc.zig");
 pub const pop = @import("pop.zig");
+pub const push0 = @import("push0.zig");
 pub const push1 = @import("push1.zig");
 pub const push10 = @import("push10.zig");
 pub const push11 = @import("push11.zig");
@@ -141,6 +143,8 @@ pub const swap7 = @import("swap7.zig");
 pub const swap8 = @import("swap8.zig");
 pub const swap9 = @import("swap9.zig");
 pub const timestamp = @import("timestamp.zig");
+pub const tload = @import("tload.zig");
+pub const tstore = @import("tstore.zig");
 pub const @"xor" = @import("xor.zig");
 
 pub const all_opcodes = [_]type {
@@ -203,6 +207,7 @@ pub const all_opcodes = [_]type {
     log3,
     log4,
     lt,
+    mcopy,
     mload,
     mod,
     msize,
@@ -216,6 +221,7 @@ pub const all_opcodes = [_]type {
     origin,
     pc,
     pop,
+    push0,
     push1,
     push10,
     push11,
@@ -284,5 +290,7 @@ pub const all_opcodes = [_]type {
     swap8,
     swap9,
     timestamp,
+    tload,
+    tstore,
     @"xor",
 };

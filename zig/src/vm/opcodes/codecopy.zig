@@ -47,3 +47,26 @@ fn execute(evm: *EVM) !void {
         try evm.memory.storeByte(evm.allocator, dest_offset + i, byte);
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 3) return error.StackUnderflow;
+    // CODECOPY: destOffset, offset, length -> void
+    if (stack_top.* < 3) return error.StackUnderflow;
+    const size_idx = stack_top.* - 1;
+    const offset_idx = stack_top.* - 2;
+    const destOffset_idx = stack_top.* - 3;
+
+    try jit.materialize_slot(size_idx);
+    try jit.materialize_slot(offset_idx);
+    try jit.materialize_slot(destOffset_idx);
+
+    const destOffset_slot = jit.get_virtual_slot(@intCast(destOffset_idx));
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const size_slot = jit.get_virtual_slot(@intCast(size_idx));
+
+    try jit.emit_native_codecopy(destOffset_slot.register, offset_slot.register, size_slot.register);
+    jit.pop_virtual(3);
+    stack_top.* -= 3;
+}

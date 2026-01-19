@@ -64,3 +64,37 @@ fn execute(evm: *EVM) !void {
         } else return error.StackUnderflow;
     } else return error.StackUnderflow;
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const shift_idx = stack_top.* - 1; // shift amount (TOS)
+    const val_idx = stack_top.* - 2; // value to shift
+
+    const v_shift = jit.get_virtual_slot(@intCast(shift_idx));
+    const v_val = jit.get_virtual_slot(@intCast(val_idx));
+
+    // Constant folding: if both are constants, compute at compile time
+    if (v_shift == .constant and v_val == .constant) {
+        const shift_amt = v_shift.constant;
+        var result: u256 = 0;
+        if (shift_amt < 256) {
+            result = v_val.constant << @as(u8, @intCast(shift_amt));
+        }
+        jit.pop_virtual(2);
+        try jit.push_virtual_constant(result);
+        stack_top.* -= 1;
+        return;
+    }
+
+    // For dynamic shifts, emit native ARM64 code
+    try jit.materialize_slot(@intCast(shift_idx));
+    try jit.materialize_slot(@intCast(val_idx));
+
+    const shift_slot = jit.get_virtual_slot(@intCast(shift_idx));
+    const val_slot = jit.get_virtual_slot(@intCast(val_idx));
+
+    try jit.emit_native_shl(val_slot.register, val_slot.register, shift_slot.register);
+    jit.pop_virtual(1);
+    stack_top.* -= 1;
+}

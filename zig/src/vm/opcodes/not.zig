@@ -24,10 +24,26 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 1) return error.StackUnderflow;
-    const s1 = stack_top.* - 1;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Not, &.{
-        .{ .symbol = "_HOLE_DST", .value = s1 },
-        .{ .symbol = "_HOLE_SRC1", .value = s1 },
-    });
+    const s1_idx = stack_top.* - 1;
+
+    const v1 = jit.get_virtual_slot(@intCast(s1_idx));
+
+    // 1. Constant Folding
+    if (v1 == .constant) {
+        const res = ~v1.constant;
+        jit.pop_virtual(1);
+        try jit.push_virtual_constant(res);
+        return;
+    }
+
+    // 2. Native Emission
+    try jit.materialize_slot(@intCast(s1_idx));
+
+    const s1_slot = jit.get_virtual_slot(@intCast(s1_idx));
+    const s1_reg = switch (s1_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+
+    try jit.emit_native_not(s1_reg, s1_reg);
 }

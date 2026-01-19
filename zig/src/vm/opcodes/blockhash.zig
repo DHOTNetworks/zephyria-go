@@ -48,3 +48,16 @@ fn execute(evm: *EVM) !void {
         try evm.stack.push(evm.allocator, BigInt.zero());
     }
 }
+
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 1) return error.StackUnderflow;
+    // BLOCKHASH: Pop blockNumber, push hash
+    const bn_idx = stack_top.* - 1;
+    try jit.materialize_slot(@intCast(bn_idx));
+    const slot = jit.get_virtual_slot(@intCast(bn_idx));
+    // Overwrite input with output
+    try jit.emit_native_blockhash(slot.register, slot.register);
+    // Stack depth unchanged (1 in, 1 out)
+}

@@ -31,9 +31,29 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 1) return error.StackUnderflow;
-    const s1 = stack_top.* - 1;
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Mload, &.{
-        .{ .symbol = "_HOLE_DST", .value = s1 },
-    });
+    const offset_sidx = stack_top.* - 1;
+
+    try jit.materialize_slot(@intCast(offset_sidx));
+    const o_slot = jit.get_virtual_slot(@intCast(offset_sidx));
+    const o_reg = switch (o_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+
+    // Reuse slot for result? No, MLOAD pops 1 (offset), pushes 1 (value).
+    // Stack top (offset) is consumed.
+    // We can reuse the register bank if we want, OR pop and push new.
+    // Logic:
+    // Offset is at stack_top - 1.
+    // We need a register for result.
+    // Offset reg is free after use?
+    // MLOAD is: Stack: offset -> value.
+    // Same slot.
+    // So we load 'offset', use it, and overwrite register with result.
+    try jit.emit_native_mload(o_reg, o_reg);
+
+    // MLOAD: offset is consumed, value is pushed. Length unchanged.
+    // However, metadata must be updated to memory.
+    jit.pop_virtual(1);
+    try jit.push_virtual_memory();
 }

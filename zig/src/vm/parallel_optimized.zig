@@ -6,7 +6,7 @@ const Thread = std.Thread;
 const Mutex = std.Thread.Mutex;
 const Condition = std.Thread.Condition;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
+const ArrayList = std.ArrayListUnmanaged;
 const HashMap = std.HashMap;
 const AutoHashMap = std.AutoHashMap;
 
@@ -56,61 +56,47 @@ pub const OptimizedDependencyAnalyzer = struct {
         self.dependencies.deinit(self.allocator);
     }
 
-    /// Optimized O(n) dependency analysis using hash maps
+    /// Optimized dependency analysis using access lists
     pub fn analyzeDependencies(self: *OptimizedDependencyAnalyzer, transactions: []const Transaction) ![]Dependency {
         self.dependencies.clearRetainingCapacity();
         self.address_access_map.clearRetainingCapacity();
 
-        // First pass: Build access patterns
+        // 1. Build access patterns from both implicit and explicit access lists
         for (transactions, 0..) |tx, i| {
             const tx_id = @as(u32, @intCast(i));
 
-            // Track 'from' address as writer (nonce increment, balance decrease)
+            // Implicit: 'from' (balance/nonce) and 'to' (balance)
             try self.recordAccess(tx.from, tx_id, .writer);
-
-            // Track 'to' address as writer (balance increase)
             if (tx.to) |to_addr| {
                 try self.recordAccess(to_addr, tx_id, .writer);
             }
+
+            // Explicit: Access List (EIP-2930)
+            for (tx.access_list) |entry| {
+                try self.recordAccess(entry.address, tx_id, .writer);
+                // Note: In a full implementation, we'd also track storage_keys specifically.
+                // For this dependency granularity, marking the whole address as touched is safe.
+            }
         }
 
-        // Second pass: Generate dependencies from conflicts
+        // 2. Generate dependencies from Conflicts
         var iterator = self.address_access_map.iterator();
         while (iterator.next()) |entry| {
             const access_info = entry.value_ptr;
 
-            // Write-Write conflicts
-            for (access_info.writers.items, 0..) |writer1, i| {
-                for (access_info.writers.items[i + 1..]) |writer2| {
+            // Conflicts: Write-Write, Read-Write, Write-Read
+            // Current model (writer-only for safety) creates a strict ordering
+            for (access_info.writers.items, 0..) |tx_a, i| {
+                for (access_info.writers.items[i + 1 ..]) |tx_b| {
+                    // Ensure deterministic ordering (lower tx_id first)
+                    const from = @min(tx_a, tx_b);
+                    const to = @max(tx_a, tx_b);
                     try self.dependencies.append(self.allocator, Dependency{
-                        .from_tx = writer1,
-                        .to_tx = writer2,
+                        .from_tx = from,
+                        .to_tx = to,
                         .address = entry.key_ptr.*,
                         .conflict_type = .write_write,
                     });
-                }
-            }
-
-            // Read-Write conflicts (future optimization)
-            for (access_info.readers.items) |reader| {
-                for (access_info.writers.items) |writer| {
-                    if (reader != writer) {
-                        const dep = if (reader < writer)
-                            Dependency{
-                                .from_tx = reader,
-                                .to_tx = writer,
-                                .address = entry.key_ptr.*,
-                                .conflict_type = .balance,
-                            }
-                        else
-                            Dependency{
-                                .from_tx = writer,
-                                .to_tx = reader,
-                                .address = entry.key_ptr.*,
-                                .conflict_type = .balance,
-                            };
-                        try self.dependencies.append(self.allocator, dep);
-                    }
                 }
             }
         }
@@ -237,16 +223,12 @@ pub const WorkStealingThreadPool = struct {
     }
 
     pub fn submitWork(self: *WorkStealingThreadPool, work_item: WorkItem) !void {
-        // Try to submit to a random thread's queue first
-        const thread_idx = std.crypto.random.intRangeAtMost(u32, 0, self.thread_count - 1);
+        try self.global_queue.push(self.allocator, work_item);
 
-        if (self.work_queues[thread_idx].push(self.allocator, work_item)) {
-            // Successfully submitted to thread queue
-        } else |_| {
-            // Fallback to global queue
-            try self.global_queue.push(self.allocator, work_item);
-            self.global_condition.signal();
-        }
+        // Wake up at least one worker to process the work
+        self.global_mutex.lock();
+        self.global_condition.signal();
+        self.global_mutex.unlock();
     }
 
     fn workerThread(self: *WorkStealingThreadPool, thread_id: usize) void {
@@ -297,120 +279,7 @@ pub const WorkStealingThreadPool = struct {
     }
 };
 
-/// Speculative execution engine with rollback support
-pub const SpeculativeExecutor = struct {
-    allocator: Allocator,
-    checkpoints: AutoHashMap(u32, ExecutionCheckpoint),
-
-    const ExecutionCheckpoint = struct {
-        account_states: AutoHashMap([20]u8, AccountSnapshot),
-        memory_snapshot: []u8,
-        stack_snapshot: []BigInt,
-
-        fn deinit(self: *ExecutionCheckpoint, allocator: Allocator) void {
-            var iter = self.account_states.iterator();
-            while (iter.next()) |entry| {
-                entry.value_ptr.deinit(allocator);
-            }
-            self.account_states.deinit();
-            allocator.free(self.memory_snapshot);
-            allocator.free(self.stack_snapshot);
-        }
-    };
-
-    const AccountSnapshot = struct {
-        balance: BigInt,
-        nonce: u64,
-        storage: AutoHashMap(BigInt, BigInt),
-
-        fn deinit(self: *AccountSnapshot, allocator: Allocator) void {
-            self.storage.deinit();
-            _ = allocator; // Balance and nonce don't need deallocation
-        }
-    };
-
-    pub fn init(allocator: Allocator) SpeculativeExecutor {
-        return SpeculativeExecutor{
-            .allocator = allocator,
-            .checkpoints = AutoHashMap(u32, ExecutionCheckpoint).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *SpeculativeExecutor) void {
-        var iter = self.checkpoints.iterator();
-        while (iter.next()) |entry| {
-            entry.value_ptr.deinit(self.allocator);
-        }
-        self.checkpoints.deinit();
-    }
-
-    pub fn createCheckpoint(self: *SpeculativeExecutor, tx_id: u32, evm: *EVM) !void {
-        var checkpoint = ExecutionCheckpoint{
-            .account_states = AutoHashMap([20]u8, AccountSnapshot).init(self.allocator),
-            .memory_snapshot = try self.allocator.dupe(u8, evm.memory.data.items),
-            .stack_snapshot = try self.allocator.dupe(BigInt, evm.stack.items.items),
-        };
-
-        // Snapshot account states
-        var account_iter = evm.accounts.iterator();
-        while (account_iter.next()) |entry| {
-            var storage_copy = AutoHashMap(BigInt, BigInt).init(self.allocator);
-            var storage_iter = entry.value_ptr.storage.iterator();
-            while (storage_iter.next()) |storage_entry| {
-                try storage_copy.put(storage_entry.key_ptr.*, storage_entry.value_ptr.*);
-            }
-
-            const snapshot = AccountSnapshot{
-                .balance = entry.value_ptr.balance,
-                .nonce = entry.value_ptr.nonce,
-                .storage = storage_copy,
-            };
-
-            try checkpoint.account_states.put(entry.key_ptr.*, snapshot);
-        }
-
-        try self.checkpoints.put(tx_id, checkpoint);
-    }
-
-    pub fn rollback(self: *SpeculativeExecutor, tx_id: u32, evm: *EVM) !void {
-        if (self.checkpoints.get(tx_id)) |checkpoint| {
-            // Restore memory
-            if (evm.memory.data.items.len < checkpoint.memory_snapshot.len) {
-                try evm.memory.data.resize(evm.allocator, checkpoint.memory_snapshot.len);
-            }
-            @memcpy(evm.memory.data.items[0..checkpoint.memory_snapshot.len], checkpoint.memory_snapshot);
-
-            // Restore stack
-            evm.stack.items.clearRetainingCapacity();
-            for (checkpoint.stack_snapshot) |item| {
-                try evm.stack.items.append(evm.allocator, item);
-            }
-
-            // Restore account states
-            var account_iter = checkpoint.account_states.iterator();
-            while (account_iter.next()) |entry| {
-                if (evm.accounts.getPtr(entry.key_ptr.*)) |account| {
-                    account.balance = entry.value_ptr.balance;
-                    account.nonce = entry.value_ptr.nonce;
-
-                    // Restore storage
-                    account.storage.clearRetainingCapacity();
-                    var storage_iter = entry.value_ptr.storage.iterator();
-                    while (storage_iter.next()) |storage_entry| {
-                        try account.storage.put(storage_entry.key_ptr.*, storage_entry.value_ptr.*);
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn commitCheckpoint(self: *SpeculativeExecutor, tx_id: u32) void {
-        if (self.checkpoints.fetchRemove(tx_id)) |entry| {
-            var checkpoint = entry.value;
-            checkpoint.deinit(self.allocator);
-        }
-    }
-};
+// Speculative execution engine removed per Native_EVM.md (Deterministic focus)
 
 /// Memory pool for reducing allocations
 pub const MemoryPool = struct {
@@ -513,22 +382,28 @@ pub const StateChange = @import("parallel.zig").StateChange;
 pub const ChangeType = @import("parallel.zig").ChangeType;
 pub const WorkItem = @import("parallel.zig").WorkItem;
 pub const ParallelExecutionStats = @import("parallel.zig").ParallelExecutionStats;
-pub const ParallelConfig = @import("parallel.zig").ParallelConfig;
 pub const ConflictDetectionLevel = @import("parallel.zig").ConflictDetectionLevel;
 
-/// Optimized parallel scheduler combining all improvements
+pub const ParallelConfig = struct {
+    max_threads: u32 = 4,
+    batch_size: u32 = 100,
+    dependency_lookahead: u32 = 50, // How many transactions ahead to analyze for dependencies
+    enable_state_snapshots: bool = true,
+    conflict_detection_level: ConflictDetectionLevel = .medium,
+};
 pub const OptimizedParallelScheduler = struct {
     allocator: Allocator,
     thread_pool: *WorkStealingThreadPool,
     dependency_analyzer: OptimizedDependencyAnalyzer,
-    speculative_executor: SpeculativeExecutor,
     memory_pool: MemoryPool,
     execution_results: ArrayList(ExecutionResult),
     pending_transactions: ArrayList(Transaction),
-    ready_queue: ArrayList(u32),
     completed_mask: []bool,
     dependency_count: []u32,
     config: ParallelConfig,
+
+    // Atomic counter for wave tracking
+    completed_in_wave: std.atomic.Value(u32),
 
     pub fn init(allocator: Allocator, config: ParallelConfig) !*OptimizedParallelScheduler {
         const scheduler = try allocator.create(OptimizedParallelScheduler);
@@ -536,14 +411,13 @@ pub const OptimizedParallelScheduler = struct {
             .allocator = allocator,
             .thread_pool = try WorkStealingThreadPool.init(allocator, config.max_threads),
             .dependency_analyzer = OptimizedDependencyAnalyzer.init(allocator),
-            .speculative_executor = SpeculativeExecutor.init(allocator),
             .memory_pool = MemoryPool.init(allocator),
             .execution_results = ArrayList(ExecutionResult){},
             .pending_transactions = ArrayList(Transaction){},
-            .ready_queue = ArrayList(u32){},
             .completed_mask = &[_]bool{},
             .dependency_count = &[_]u32{},
             .config = config,
+            .completed_in_wave = std.atomic.Value(u32).init(0),
         };
         return scheduler;
     }
@@ -551,7 +425,6 @@ pub const OptimizedParallelScheduler = struct {
     pub fn deinit(self: *OptimizedParallelScheduler) void {
         self.thread_pool.deinit();
         self.dependency_analyzer.deinit();
-        self.speculative_executor.deinit();
         self.memory_pool.deinit();
 
         for (self.execution_results.items) |*result| {
@@ -559,7 +432,6 @@ pub const OptimizedParallelScheduler = struct {
         }
         self.execution_results.deinit(self.allocator);
         self.pending_transactions.deinit(self.allocator);
-        self.ready_queue.deinit(self.allocator);
 
         if (self.completed_mask.len > 0) {
             self.allocator.free(self.completed_mask);
@@ -582,39 +454,36 @@ pub const OptimizedParallelScheduler = struct {
         const dependencies = try self.dependency_analyzer.analyzeDependencies(transactions);
 
         // Build dependency graph
-        try self.buildDependencyGraph(dependencies);
+        self.buildDependencyGraph(dependencies);
 
-        // Execute with work-stealing and speculation
+        // Execute with wave-based deterministic strategy
         try self.executeWithOptimizations(transactions, dependencies);
 
         const end_time = std.time.nanoTimestamp();
         const execution_time = end_time - start_time;
 
-        // Log performance metrics
-        std.log.info("Optimized execution completed in {d}ms", .{@as(f64, @floatFromInt(execution_time)) / 1_000_000.0});
+        std.log.info("Wave-based execution completed in {d}ms", .{@as(f64, @floatFromInt(execution_time)) / 1_000_000.0});
 
         return self.execution_results.items;
     }
 
     fn setupExecution(self: *OptimizedParallelScheduler, transactions: []const Transaction) !void {
         self.pending_transactions.clearRetainingCapacity();
-        self.execution_results.clearRetainingCapacity();
-        self.ready_queue.clearRetainingCapacity();
 
-        // Resize tracking arrays with memory pool
+        // Resize tracking arrays
         if (self.completed_mask.len < transactions.len) {
-            if (self.completed_mask.len > 0) {
-                self.allocator.free(self.completed_mask);
-            }
+            if (self.completed_mask.len > 0) self.allocator.free(self.completed_mask);
             self.completed_mask = try self.allocator.alloc(bool, transactions.len);
         }
-
         if (self.dependency_count.len < transactions.len) {
-            if (self.dependency_count.len > 0) {
-                self.allocator.free(self.dependency_count);
-            }
+            if (self.dependency_count.len > 0) self.allocator.free(self.dependency_count);
             self.dependency_count = try self.allocator.alloc(u32, transactions.len);
         }
+
+        // Initialize execution results list with correct size
+        for (self.execution_results.items) |*res| res.deinit(self.allocator);
+        self.execution_results.clearRetainingCapacity();
+        try self.execution_results.resize(self.allocator, transactions.len);
 
         @memset(self.completed_mask[0..transactions.len], false);
         @memset(self.dependency_count[0..transactions.len], 0);
@@ -624,35 +493,56 @@ pub const OptimizedParallelScheduler = struct {
         }
     }
 
-    fn buildDependencyGraph(self: *OptimizedParallelScheduler, dependencies: []const Dependency) !void {
+    fn buildDependencyGraph(self: *OptimizedParallelScheduler, dependencies: []const Dependency) void {
         for (dependencies) |dep| {
             self.dependency_count[dep.to_tx] += 1;
         }
-
-        for (0..self.pending_transactions.items.len) |i| {
-            if (self.dependency_count[i] == 0) {
-                try self.ready_queue.append(self.allocator, @intCast(i));
-            }
-        }
     }
 
+    /// Execute with deterministic Wave-based strategy
     fn executeWithOptimizations(self: *OptimizedParallelScheduler, transactions: []const Transaction, dependencies: []const Dependency) !void {
-        var completed_count: u32 = 0;
-        const total_transactions = @as(u32, @intCast(transactions.len));
+        var completed_total: u32 = 0;
+        const total_txs = @as(u32, @intCast(transactions.len));
 
-        while (completed_count < total_transactions) {
-            // Submit ready transactions with speculation if enabled
-            while (self.ready_queue.items.len > 0) {
-                const tx_id = self.ready_queue.orderedRemove(0);
+        while (completed_total < total_txs) {
+            // 1. Identify "Ready" transactions (in-degree 0)
+            var wave_list = ArrayList(u32){};
+            defer wave_list.deinit(self.allocator);
+
+            for (0..total_txs) |i| {
+                const tx_id = @as(u32, @intCast(i));
+                if (!self.completed_mask[tx_id] and self.dependency_count[tx_id] == 0) {
+                    try wave_list.append(self.allocator, tx_id);
+                }
+            }
+
+            if (wave_list.items.len == 0) {
+                if (completed_total < total_txs) return error.CircularDependencyDetected;
+                break;
+            }
+
+            // 2. Dispatch Wave to thread pool
+            const wave_size = @as(u32, @intCast(wave_list.items.len));
+            self.completed_in_wave.store(0, .monotonic);
+
+            for (wave_list.items) |tx_id| {
                 try self.submitOptimizedExecution(tx_id);
             }
 
-            // Adaptive waiting with exponential backoff
-            var wait_time: u64 = 1000; // Start with 1μs
-            while (self.ready_queue.items.len == 0 and completed_count < total_transactions) {
-                std.Thread.sleep(wait_time);
-                wait_time = @min(wait_time * 2, 1_000_000); // Cap at 1ms
-                completed_count = self.processCompletedTransactions(dependencies);
+            // 3. Wait for Wave Barrier
+            while (self.completed_in_wave.load(.acquire) < wave_size) {
+                std.Thread.yield() catch {}; // Allow other threads to run
+                std.Thread.sleep(10 * std.time.ns_per_us); // 10us sleep to prevent CPU saturation
+            }
+
+            // 4. Resolve dependencies for the next wave
+            for (wave_list.items) |idx| {
+                for (dependencies) |dep| {
+                    if (dep.from_tx == idx) {
+                        self.dependency_count[dep.to_tx] -= 1;
+                    }
+                }
+                completed_total += 1;
             }
         }
     }
@@ -663,7 +553,6 @@ pub const OptimizedParallelScheduler = struct {
             .scheduler = self,
             .tx_id = tx_id,
             .transaction = self.pending_transactions.items[tx_id],
-            .use_speculation = self.config.enable_speculative_execution,
         };
 
         const work_item = WorkItem{
@@ -673,41 +562,27 @@ pub const OptimizedParallelScheduler = struct {
 
         try self.thread_pool.submitWork(work_item);
     }
-
-    fn processCompletedTransactions(self: *OptimizedParallelScheduler, dependencies: []const Dependency) u32 {
-        var completed_count: u32 = 0;
-
-        for (self.completed_mask[0..self.pending_transactions.items.len]) |completed| {
-            if (completed) completed_count += 1;
-        }
-
-        for (dependencies) |dep| {
-            if (self.completed_mask[dep.from_tx] and !self.completed_mask[dep.to_tx]) {
-                if (self.dependency_count[dep.to_tx] > 0) {
-                    self.dependency_count[dep.to_tx] -= 1;
-
-                    if (self.dependency_count[dep.to_tx] == 0) {
-                        self.ready_queue.append(self.allocator, dep.to_tx) catch {};
-                    }
-                }
-            }
-        }
-
-        return completed_count;
-    }
 };
 
 const OptimizedExecutionContext = struct {
     scheduler: *OptimizedParallelScheduler,
     tx_id: u32,
     transaction: Transaction,
-    use_speculation: bool,
 };
 
 fn executeOptimizedTransactionWork(work_item: *WorkItem) void {
     const context: *OptimizedExecutionContext = @ptrCast(@alignCast(work_item.context));
 
+    // Ensure we ALWAYS signal the scheduler and clean up, even on early exit
+    defer {
+        _ = context.scheduler.completed_in_wave.fetchAdd(1, .release);
+        context.scheduler.allocator.destroy(context);
+    }
+
+    // In a production JIT, each thread would have a pre-warmed EVM instance.
+    // Here we init for correctness, ensuring JIT is engaged.
     var evm = EVM.init(context.scheduler.allocator) catch {
+        std.log.err("Worker {d}: Failed to initialize EVM", .{context.tx_id});
         return;
     };
     defer evm.deinit();
@@ -720,33 +595,19 @@ fn executeOptimizedTransactionWork(work_item: *WorkItem) void {
         .state_changes = ArrayList(StateChange){},
     };
 
-    // Create checkpoint for speculation
-    if (context.use_speculation) {
-        context.scheduler.speculative_executor.createCheckpoint(context.tx_id, evm) catch {};
-    }
-
-    // Execute transaction
+    // Execute transaction using JIT
     evm.applyTransaction(context.transaction) catch |err| {
-        if (context.use_speculation) {
-            context.scheduler.speculative_executor.rollback(context.tx_id, evm) catch {};
-        }
         result.error_msg = context.scheduler.allocator.dupe(u8, @errorName(err)) catch null;
     };
 
     if (result.error_msg == null) {
         result.success = true;
         result.gas_used = evm.gas_used;
-
-        if (context.use_speculation) {
-            context.scheduler.speculative_executor.commitCheckpoint(context.tx_id);
-        }
     }
 
-    // Store result atomically
-    context.scheduler.execution_results.append(context.scheduler.allocator, result) catch {};
+    // Store result
+    context.scheduler.execution_results.items[context.tx_id] = result;
     context.scheduler.completed_mask[context.tx_id] = true;
-
-    context.scheduler.allocator.destroy(context);
 }
 
 // Performance testing functions
@@ -754,10 +615,10 @@ pub fn benchmarkOptimizedExecution(allocator: Allocator) !void {
     std.debug.print("=== Optimized Parallel Execution Benchmark ===\n", .{});
 
     const configs = [_]ParallelConfig{
-        .{ .max_threads = 1, .enable_speculative_execution = false },
-        .{ .max_threads = 4, .enable_speculative_execution = false },
-        .{ .max_threads = 4, .enable_speculative_execution = true },
-        .{ .max_threads = 8, .enable_speculative_execution = true },
+        .{ .max_threads = 1 },
+        .{ .max_threads = 2 },
+        .{ .max_threads = 4 },
+        .{ .max_threads = 8 },
     };
 
     const transaction_counts = [_]u32{ 100, 500, 1000 };
@@ -785,10 +646,7 @@ pub fn benchmarkOptimizedExecution(allocator: Allocator) !void {
                 if (result.success) successful += 1;
             }
 
-            const spec_str = if (config.enable_speculative_execution) "speculative" else "conservative";
-            std.debug.print("  {d} threads ({s}): {d:.2}ms ({d:.0} tx/s)\n", .{
-                config.max_threads, spec_str, execution_time, throughput
-            });
+            std.debug.print("  {d} threads: {d:.2}ms ({d:.0} tx/s)\n", .{ config.max_threads, execution_time, throughput });
         }
     }
 }
@@ -817,4 +675,40 @@ fn generateTestTransactions(allocator: Allocator, count: u32) ![]Transaction {
     }
 
     return transactions;
+}
+test "Deterministic Parallel JIT Execution" {
+    const allocator = std.testing.allocator;
+
+    const config = ParallelConfig{
+        .max_threads = 4,
+    };
+
+    var scheduler = try OptimizedParallelScheduler.init(allocator, config);
+    defer scheduler.deinit();
+
+    const addr1 = [_]u8{1} ** 20;
+    const addr2 = [_]u8{2} ** 20;
+    const addr3 = [_]u8{3} ** 20;
+
+    const transactions = [_]Transaction{
+        .{
+            .from = addr1,
+            .to = addr2,
+            .value = BigInt.init(100),
+            .data = &[_]u8{},
+            .gas_limit = 21000,
+            .gas_price = BigInt.init(1),
+        },
+        .{
+            .from = addr2,
+            .to = addr3,
+            .value = BigInt.init(50),
+            .data = &[_]u8{},
+            .gas_limit = 21000,
+            .gas_price = BigInt.init(1),
+        },
+    };
+
+    const results = try scheduler.executeTransactionBatch(&transactions);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
 }

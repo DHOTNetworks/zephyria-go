@@ -89,3 +89,48 @@ fn execute(evm: *EVM) !void {
         } else return error.StackUnderflow;
     } else return error.StackUnderflow;
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    if (stack_top.* < 2) return error.StackUnderflow;
+    const shift_idx = stack_top.* - 1;
+    const val_idx = stack_top.* - 2;
+
+    const v_shift = jit.get_virtual_slot(@intCast(shift_idx));
+    const v_val = jit.get_virtual_slot(@intCast(val_idx));
+
+    // Constant folding for SAR (arithmetic right shift)
+    if (v_shift == .constant and v_val == .constant) {
+        const shift_amt = v_shift.constant;
+        const value = v_val.constant;
+        const is_negative = (value >> 255) == 1;
+
+        var result: u256 = undefined;
+        if (shift_amt >= 256) {
+            // If negative, result is all 1s (-1), else all 0s
+            result = if (is_negative) @as(u256, 0) -% 1 else 0;
+        } else {
+            result = value >> @as(u8, @intCast(shift_amt));
+            // Sign extend: fill upper bits with 1s if negative
+            if (is_negative and shift_amt > 0) {
+                const mask = (@as(u256, 1) << @as(u8, @intCast(256 - shift_amt))) -% 1;
+                result = result | ~mask;
+            }
+        }
+        jit.pop_virtual(2);
+        try jit.push_virtual_constant(result);
+        stack_top.* -= 1;
+        return;
+    }
+
+    // For dynamic shifts, emit native code
+    try jit.materialize_slot(@intCast(shift_idx));
+    try jit.materialize_slot(@intCast(val_idx));
+
+    const shift_slot = jit.get_virtual_slot(@intCast(shift_idx));
+    const val_slot = jit.get_virtual_slot(@intCast(val_idx));
+
+    try jit.emit_native_sar(val_slot.register, val_slot.register, shift_slot.register);
+    jit.pop_virtual(1);
+    stack_top.* -= 1;
+}

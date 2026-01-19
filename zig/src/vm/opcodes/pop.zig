@@ -19,9 +19,9 @@ fn execute(evm: *EVM) !void {
 }
 
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
-    _ = jit;
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 1) return error.StackUnderflow;
+    jit.pop_virtual(1);
     stack_top.* -= 1;
 }

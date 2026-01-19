@@ -31,12 +31,30 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 2) return error.StackUnderflow;
-    const s1 = stack_top.* - 1; // value
-    const s2 = stack_top.* - 2; // offset
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Mstore, &.{
-        .{ .symbol = "_HOLE_DST", .value = s1 },
-        .{ .symbol = "_HOLE_SRC1", .value = s2 },
-    });
+    // EVM: MSTORE pops offset (top), then value
+    const offset_sidx = stack_top.* - 1; // offset is TOS
+    const val_sidx = stack_top.* - 2; // value is TOS-1
+
+    // MSTORE: offsets already materialized
+    try jit.materialize_slot(@intCast(offset_sidx));
+    try jit.materialize_slot(@intCast(val_sidx));
+
+    // Get registers
+    const o_slot = jit.get_virtual_slot(@intCast(offset_sidx));
+    const v_slot = jit.get_virtual_slot(@intCast(val_sidx));
+
+    // Unsafe extract: we assume materialization worked
+    const o_reg = switch (o_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+    const v_reg = switch (v_slot) {
+        .register => |r| r,
+        else => return error.InvalidStackState,
+    };
+
+    try jit.emit_native_mstore(o_reg, v_reg);
+
+    jit.pop_virtual(2);
     stack_top.* -= 2;
 }

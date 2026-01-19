@@ -19,3 +19,10 @@ fn execute(evm: *EVM) !void {
     // Push the gas price onto the stack
     try evm.stack.push(evm.allocator, evm.gas_price);
 }
+pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
+    _ = pc;
+    _ = bytecode;
+    const GAS_PRICE: u256 = 1_000_000_000; // 1 gwei
+    try jit.push_virtual_constant(GAS_PRICE);
+    stack_top.* += 1;
+}

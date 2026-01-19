@@ -6,7 +6,7 @@ const Thread = std.Thread;
 const Mutex = std.Thread.Mutex;
 const Condition = std.Thread.Condition;
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayList;
+const ArrayList = std.ArrayListUnmanaged;
 
 const main = @import("main.zig");
 const EVM = main.EVM;
@@ -16,7 +16,7 @@ const BigInt = main.BigInt;
 /// Represents a dependency between two transactions
 pub const Dependency = struct {
     from_tx: u32, // Transaction ID that must complete first
-    to_tx: u32,   // Transaction ID that depends on the first
+    to_tx: u32, // Transaction ID that depends on the first
     address: [20]u8, // Address that creates the dependency
     conflict_type: ConflictType,
 };
@@ -24,8 +24,8 @@ pub const Dependency = struct {
 /// Types of conflicts that can occur between transactions
 pub const ConflictType = enum {
     write_write, // Both transactions write to same storage
-    balance,     // Balance modification conflicts
-    nonce,       // Nonce conflicts
+    balance, // Balance modification conflicts
+    nonce, // Nonce conflicts
 };
 
 /// Execution result for a single transaction
@@ -483,8 +483,8 @@ pub const ParallelConfig = struct {
 
 /// Levels of conflict detection granularity
 pub const ConflictDetectionLevel = enum {
-    basic,   // Only address-level conflicts
-    medium,  // Address + storage key conflicts
+    basic, // Only address-level conflicts
+    medium, // Address + storage key conflicts
     precise, // Full state access tracking
 };
 

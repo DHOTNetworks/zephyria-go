@@ -32,10 +32,21 @@ pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const 
     _ = pc;
     _ = bytecode;
     if (stack_top.* < 2) return error.StackUnderflow;
-    _ = stack_top.* - 1; // dest (ignored for now as we use static target)
     const cond = stack_top.* - 2;
-    // For the test case (PC=2), we'll hardcode or try to be smart
-    // In a real JIT, we'd use a jump table.
-    try jit.compile_jumpi(cond, 2);
-    stack_top.* -= 2;
+    // Check for Static Jump (Constant)
+    const dest_idx = stack_top.* - 1;
+    const dest_slot = jit.get_virtual_slot(dest_idx);
+    std.debug.print("[JIT] JUMPI dest_idx={d} slot_type={s}\n", .{ dest_idx, @tagName(dest_slot) });
+
+    if (dest_slot == .constant) {
+        const target = @as(usize, @intCast(dest_slot.constant));
+        std.debug.print("[JIT] JUMPI target={d} cond_idx={d}\n", .{ target, cond });
+        try jit.compile_jumpi(cond, target);
+
+        // JUMPI pops dest + cond
+        jit.pop_virtual(2);
+        stack_top.* -= 2;
+    } else {
+        return error.DynamicJumpNotSupported;
+    }
 }

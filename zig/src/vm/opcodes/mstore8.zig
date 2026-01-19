@@ -30,13 +30,20 @@ fn execute(evm: *EVM) !void {
 pub fn jit_compile(jit: anytype, pc: *usize, stack_top: *u64, bytecode: []const u8) !void {
     _ = pc;
     _ = bytecode;
+    // MSTORE8: Stack order pops offset first (top), then value.
+    // stack_top-1 = top = offset
+    // stack_top-2 = value
     if (stack_top.* < 2) return error.StackUnderflow;
-    const s1 = stack_top.* - 1; // value
-    const s2 = stack_top.* - 2; // offset
-    const stencils = @import("stencils");
-    try jit.emit_stencil(stencils.Mstore8, &.{
-        .{ .symbol = "_HOLE_DST", .value = s1 },
-        .{ .symbol = "_HOLE_SRC1", .value = s2 },
-    });
+    const offset_idx = stack_top.* - 1;
+    const val_idx = stack_top.* - 2;
+
+    try jit.materialize_slot(offset_idx);
+    try jit.materialize_slot(val_idx);
+
+    const offset_slot = jit.get_virtual_slot(@intCast(offset_idx));
+    const val_slot = jit.get_virtual_slot(@intCast(val_idx));
+
+    try jit.emit_native_mstore8(offset_slot.register, val_slot.register);
+    jit.pop_virtual(2);
     stack_top.* -= 2;
 }
