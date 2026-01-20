@@ -26,12 +26,12 @@ The node surrounding the VM is built for massive parallelism and efficient state
 
 ## 📂 Project Structure
 
-- `src/vm/joyboy`: The register-allocated Native JIT implementation.
+- `src/vm/joyboy`: The register-allocated Native JIT EVM implementation.
 - `src/vm/stencils`: Binary machine code stencils for the Copy-and-Patch JIT.
 - `src/vm/opcodes`: Individual opcode implementations for both JIT and Interpreter tiers.
 - `src/storage/lsm`: The custom LSM-tree database engine.
 - `src/storage/verkle`: Verkle trie implementation and cryptographic primitives.
-- `src/consensus`: Beacon chain logic and fork choice rules.
+- `src/consensus`: Zelius Consensus Engine Logic and fork choice rules.
 - `src/p2p`: QUIC-based peer-to-peer networking.
 - `src/rpc`: High-performance JSON-RPC implementation over HTTP and gRPC.
 
@@ -61,6 +61,6 @@ zig build test --summary all
 ---
 
 ## 📈 Performance Targets
-- **Single-core JIT**: 20k - 50k TPS (complex contracts)
-- **Multi-core Parallel**: 200k+ TPS (simple transfers/ERC20)
+- **Single-core JIT**: ~200k TPS (complex contracts), ~50k - 80k+ Complex Txn (Contracts, DEX Uniswap)
+- **Multi-core Parallel**: ~800k+ TPS (simple transfers/ERC20), ~400k+ Complex Transactions(Contracts, DEX Uniswap)
 - **Storage Latency**: < 10μs per state access (MemTable hit)
