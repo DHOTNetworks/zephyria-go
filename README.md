@@ -1,6 +1,6 @@
 # Zephyria Blockchain
 
-![Status](https://img.shields.io/badge/status-active-success.svg)
+![Status](https://img.shields.io/badge/Status-inactive-red.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Go Version](https://img.shields.io/badge/go-1.21%2B-blue)
 
